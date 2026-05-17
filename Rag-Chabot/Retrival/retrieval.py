@@ -13,6 +13,8 @@ import json
 import logging
 import unicodedata
 import re
+import contextlib
+import io
 from typing import List, Dict, Any, Optional
 
 import numpy as np
@@ -48,6 +50,10 @@ RERANK_ENABLED = True
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Cross-encoder cache to avoid repeated model loads and noisy startup reports.
+_CROSS_ENCODER_MODEL = None
+_CROSS_ENCODER_MODEL_NAME = None
 
 
 # ----------------------
@@ -119,7 +125,7 @@ def _trim_context(text: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
 # Search / Retrieval
 # ----------------------
 def search(query: str,
-           model: SentenceTransformer,
+           model: Any,
            faiss_index: Optional[Any],
            embeddings: Optional[np.ndarray],
            metadata: List[Dict[str, Any]],
@@ -167,7 +173,7 @@ def format_results(results: List[Dict[str, Any]]) -> str:
 # ----------------------
 # Extended pipeline functions
 # ----------------------
-def embed_query(model: SentenceTransformer, query: str) -> np.ndarray:
+def embed_query(model: Any, query: str) -> np.ndarray:
     """Return normalized embedding vector for the query."""
     q_text = build_query_for_embedding(query)
     emb = model.encode([q_text], normalize_embeddings=True, convert_to_numpy=True)[0]
@@ -237,7 +243,15 @@ def rerank_with_cross_encoder(cross_encoder_model_name: str, query: str, candida
     except Exception:
         logger.info("CrossEncoder not available, skipping rerank")
         return candidates
-    model = CrossEncoder(cross_encoder_model_name)
+
+    global _CROSS_ENCODER_MODEL, _CROSS_ENCODER_MODEL_NAME
+    if _CROSS_ENCODER_MODEL is None or _CROSS_ENCODER_MODEL_NAME != cross_encoder_model_name:
+        # Suppress verbose third-party load reports that are informational only.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            _CROSS_ENCODER_MODEL = CrossEncoder(cross_encoder_model_name)
+        _CROSS_ENCODER_MODEL_NAME = cross_encoder_model_name
+
+    model = _CROSS_ENCODER_MODEL
     # Use prefixes to match training format (query:/passage:) and normalize inputs
     q_norm = normalize_query(query)
     pairs = [
@@ -271,7 +285,7 @@ def build_prompt_context(chunks: List[Dict[str, Any]], max_chars: int = MAX_CONT
 
 
 def retrieve(query: str,
-             model: SentenceTransformer,
+             model: Any,
              faiss_index: Optional[Any],
              embeddings: Optional[np.ndarray],
              metadata: List[Dict[str, Any]],

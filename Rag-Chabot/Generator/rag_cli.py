@@ -16,6 +16,8 @@ from time import time
 import logging
 import os
 import textwrap
+import contextlib
+import io
 
 
 def _load_dotenv_from_parents(start_dir: Path) -> None:
@@ -211,7 +213,8 @@ def main():
             embeddings = retrieval.load_embeddings_np(out_dir / retrieval.EMBEDDINGS_FILENAME)
 
         print("Loading embedding model (only once)...")
-        model = retrieval.load_embedding_model()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            model = retrieval.load_embedding_model()
         print("Ready. Retrieval loaded.")
         loaded_retrieval = True
 
