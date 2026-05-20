@@ -13,8 +13,6 @@ import json
 import logging
 import unicodedata
 import re
-import contextlib
-import io
 from typing import List, Dict, Any, Optional
 
 import numpy as np
@@ -43,17 +41,8 @@ EMBEDDINGS_FILENAME = "embeddings.npy"
 METADATA_FILENAME = "metadata.json"
 FAISS_INDEX_FILENAME = "faiss.index"
 
-# Rerank / Cross-encoder defaults
-CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-RERANK_CANDIDATES = 20  # top-N candidates to rerank
-RERANK_ENABLED = True
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Cross-encoder cache to avoid repeated model loads and noisy startup reports.
-_CROSS_ENCODER_MODEL = None
-_CROSS_ENCODER_MODEL_NAME = None
 
 
 # ----------------------
@@ -125,7 +114,7 @@ def _trim_context(text: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
 # Search / Retrieval
 # ----------------------
 def search(query: str,
-           model: Any,
+           model: SentenceTransformer,
            faiss_index: Optional[Any],
            embeddings: Optional[np.ndarray],
            metadata: List[Dict[str, Any]],
@@ -173,7 +162,7 @@ def format_results(results: List[Dict[str, Any]]) -> str:
 # ----------------------
 # Extended pipeline functions
 # ----------------------
-def embed_query(model: Any, query: str) -> np.ndarray:
+def embed_query(model: SentenceTransformer, query: str) -> np.ndarray:
     """Return normalized embedding vector for the query."""
     q_text = build_query_for_embedding(query)
     emb = model.encode([q_text], normalize_embeddings=True, convert_to_numpy=True)[0]
@@ -243,21 +232,8 @@ def rerank_with_cross_encoder(cross_encoder_model_name: str, query: str, candida
     except Exception:
         logger.info("CrossEncoder not available, skipping rerank")
         return candidates
-
-    global _CROSS_ENCODER_MODEL, _CROSS_ENCODER_MODEL_NAME
-    if _CROSS_ENCODER_MODEL is None or _CROSS_ENCODER_MODEL_NAME != cross_encoder_model_name:
-        # Suppress verbose third-party load reports that are informational only.
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            _CROSS_ENCODER_MODEL = CrossEncoder(cross_encoder_model_name)
-        _CROSS_ENCODER_MODEL_NAME = cross_encoder_model_name
-
-    model = _CROSS_ENCODER_MODEL
-    # Use prefixes to match training format (query:/passage:) and normalize inputs
-    q_norm = normalize_query(query)
-    pairs = [
-        [f"query: {q_norm}", f"passage: {normalize_query((c['meta'].get('retrieval_text') or c['meta'].get('text') or ''))}"]
-        for c in candidates
-    ]
+    model = CrossEncoder(cross_encoder_model_name)
+    pairs = [[query, (c["meta"].get("retrieval_text") or c["meta"].get("text"))] for c in candidates]
     scores = model.predict(pairs)
     for c, s in zip(candidates, scores):
         c["score"] = float(s)
@@ -285,7 +261,7 @@ def build_prompt_context(chunks: List[Dict[str, Any]], max_chars: int = MAX_CONT
 
 
 def retrieve(query: str,
-             model: Any,
+             model: SentenceTransformer,
              faiss_index: Optional[Any],
              embeddings: Optional[np.ndarray],
              metadata: List[Dict[str, Any]],
@@ -298,20 +274,8 @@ def retrieve(query: str,
     indices, scores = search_index(q_emb, faiss_index, embeddings, top_k=top_k*4)
     raw = build_results(metadata, indices, scores)
     filtered = filter_results(raw, min_score=min_score, duplicate_thresh=duplicate_thresh)
-
-    # Optional rerank: rerank top-N candidates with a cross-encoder, then take top_k
-    if RERANK_ENABLED and filtered:
-        try:
-            logger.info("Reranking top %d candidates with %s", RERANK_CANDIDATES, CROSS_ENCODER_MODEL)
-            candidates = filtered[:RERANK_CANDIDATES]
-            reranked = rerank_with_cross_encoder(CROSS_ENCODER_MODEL, query, candidates)
-            final = reranked[:top_k]
-        except Exception as e:
-            logger.exception("Reranking failed, falling back to original ranking: %s", e)
-            final = filtered[:top_k]
-    else:
-        final = filtered[:top_k]
-
+    # optional rerank step could be added here
+    final = filtered[:top_k]
     context = build_prompt_context(final)
     return {"query": query, "results": final, "context": context}
 

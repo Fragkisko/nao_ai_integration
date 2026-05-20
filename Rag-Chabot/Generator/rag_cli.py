@@ -11,13 +11,13 @@ import argparse
 import importlib.util
 import json
 import requests
-import sys
 from time import time
 import logging
 import os
 import textwrap
 import contextlib
 import io
+from typing import Any, Dict, List, Optional
 
 
 def _load_dotenv_from_parents(start_dir: Path) -> None:
@@ -155,11 +155,201 @@ def render_structured_answer(query: str, structured_answer: dict, args) -> str:
     return (structured_answer.get("answer") or "").strip()
 
 
-def main():
-    # Ensure env vars from repo-level .env are available when script is launched
-    # from nested folders (e.g. Rag-Chabot/Generator).
-    _load_dotenv_from_parents(Path(__file__).resolve().parent)
+class RAGEngine:
+    def __init__(
+        self,
+        out: str = "../Embedding/out",
+        db_path: str = "../IEE_IHU_DB/NAO_IEE_IHU_DB.db",
+        api_base_url: str = "https://api.openai.com/v1",
+        api_key_env: str = "OPENAI_API_KEY",
+        model: str = "gpt-4o-mini",
+        quiet: bool = True,
+        k: int = 5,
+        structured_mode: str = "llm",
+    ) -> None:
+        self.out = out
+        self.db_path_arg = db_path
+        self.api_base_url = api_base_url
+        self.api_key_env = api_key_env
+        self.model_name = model
+        self.quiet = quiet
+        self.k = k
+        self.structured_mode = structured_mode
 
+        _load_dotenv_from_parents(Path(__file__).resolve().parent)
+
+        if self.quiet:
+            logging.basicConfig(level=logging.WARNING)
+            for logger_name in ("httpx", "sentence_transformers", "huggingface_hub", "transformers", "retrieval"):
+                logging.getLogger(logger_name).setLevel(logging.WARNING)
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+        self.rag_root = Path(__file__).resolve().parents[1]
+        self.retrieval = load_retrieval_module(self.rag_root)
+        self.structured = load_structured_retrieval_module(self.rag_root)
+
+        self.generator_dir = Path(__file__).resolve().parent
+        self.db_path = self._resolve_path(self.db_path_arg)
+
+        self.loaded_retrieval = False
+        self.meta = None
+        self.faiss_idx = None
+        self.embeddings = None
+        self.model = None
+
+    def _resolve_path(self, raw_path: str) -> Path:
+        path_obj = Path(raw_path)
+        if path_obj.is_absolute():
+            return path_obj
+
+        # Prefer an existing target from common execution roots.
+        candidates = [
+            (Path.cwd() / path_obj).resolve(),
+            (self.generator_dir / path_obj).resolve(),
+            (self.rag_root / path_obj).resolve(),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        # Keep backward-compatible fallback (historically anchored at rag_root).
+        return candidates[-1]
+
+    def _ensure_retrieval_loaded(self) -> None:
+        if self.loaded_retrieval:
+            return
+
+        out_dir = self._resolve_path(self.out)
+
+        self.meta = self.retrieval.load_metadata(out_dir / self.retrieval.METADATA_FILENAME)
+        self.faiss_idx = None
+        self.embeddings = None
+        if getattr(self.retrieval, "_HAS_FAISS", False) and (out_dir / self.retrieval.FAISS_INDEX_FILENAME).exists():
+            self.faiss_idx = self.retrieval.load_faiss_index(out_dir / self.retrieval.FAISS_INDEX_FILENAME)
+        else:
+            self.embeddings = self.retrieval.load_embeddings_np(out_dir / self.retrieval.EMBEDDINGS_FILENAME)
+
+        print("Loading embedding model (only once)...")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.model = self.retrieval.load_embedding_model()
+        print("Ready. Retrieval loaded.")
+        self.loaded_retrieval = True
+
+    def _render_structured_answer(self, query: str, structured_answer: dict) -> str:
+        if self.structured_mode == "raw":
+            return (structured_answer.get("answer") or "").strip()
+
+        prompt = build_prompt_from_structured_facts(query, structured_answer)
+        try:
+            api_key = os.environ.get(self.api_key_env, "").strip()
+            if not api_key:
+                raise RuntimeError(f"Missing API key in env var: {self.api_key_env}")
+            llm_answer = openai_chat(
+                self.api_base_url,
+                api_key,
+                self.model_name,
+                prompt,
+                temperature=0.2,
+            ).strip()
+            if llm_answer:
+                return llm_answer
+        except Exception:
+            pass
+
+        return (structured_answer.get("answer") or "").strip()
+
+    def answer_query(self, query: str) -> Dict[str, Any]:
+        q = (query or "").strip()
+        if not q:
+            return {"answer": None, "chunks": [], "error": "Empty query", "route": "none"}
+
+        if self.structured.should_route_to_courses_db(q):
+            course_answer = self.structured.answer_course_query(q, self.db_path)
+            if course_answer is not None:
+                return {
+                    "answer": self._render_structured_answer(q, course_answer),
+                    "chunks": [],
+                    "error": None,
+                    "route": "courses_db",
+                    "source": course_answer,
+                }
+
+        if self.structured.should_route_to_staff_db(q):
+            staff_answer = self.structured.answer_staff_query(q, self.db_path)
+            if staff_answer is not None:
+                return {
+                    "answer": self._render_structured_answer(q, staff_answer),
+                    "chunks": [],
+                    "error": None,
+                    "route": "staff_db",
+                    "source": staff_answer,
+                }
+
+        self._ensure_retrieval_loaded()
+        _t0 = time()
+        res = self.retrieval.retrieve(q, self.model, self.faiss_idx, self.embeddings, self.meta, top_k=self.k)
+        _ = time() - _t0
+
+        context = res.get("context", "")
+        prompt = build_prompt_from_context(context, q)
+        try:
+            api_key = os.environ.get(self.api_key_env, "").strip()
+            if not api_key:
+                return {
+                    "answer": None,
+                    "chunks": res.get("results", []),
+                    "error": f"Missing API key in env var: {self.api_key_env}",
+                    "route": "retrieval",
+                }
+            answer = openai_chat(self.api_base_url, api_key, self.model_name, prompt).strip()
+        except Exception as e:
+            return {
+                "answer": None,
+                "chunks": res.get("results", []),
+                "error": f"OpenAI call failed: {e}",
+                "route": "retrieval",
+            }
+
+        return {
+            "answer": answer,
+            "chunks": res.get("results", []),
+            "error": None,
+            "route": "retrieval",
+        }
+
+
+def format_chunk(item: dict, idx: int) -> str:
+    score = item.get("score") if isinstance(item, dict) else None
+    ridx = item.get("index") if isinstance(item, dict) else None
+    meta = item.get("meta", {}) if isinstance(item, dict) else {}
+    source = item.get("source") or meta.get("source") or meta.get("filename")
+    section = meta.get("section") or item.get("section")
+
+    text = None
+    for key in ("retrieval_text", "text", "content", "chunk"):
+        if isinstance(item, dict) and key in item and isinstance(item[key], str):
+            text = item[key]
+            break
+    if not text and isinstance(meta, dict):
+        text = meta.get("text") or meta.get("content")
+
+    if text is None:
+        text = json.dumps(item, ensure_ascii=False)
+
+    lines: List[str] = []
+    lines.append("" + "=" * 60)
+    lines.append(f"Chunk {idx}  (retrieval_index={ridx}  score={score})")
+    if source:
+        lines.append(f"Source: {source}")
+    if section:
+        lines.append(f"Section: {section}")
+    lines.append("")
+    lines.append(textwrap.fill(text.strip(), width=100))
+    lines.append("" + "=" * 60)
+    return "\n".join(lines)
+
+
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=str, default="../Embedding/out", help="embedding output folder")
     parser.add_argument("--db-path", type=str, default="../IEE_IHU_DB/NAO_IEE_IHU_DB.db", help="SQLite DB path for structured staff answers")
@@ -179,142 +369,36 @@ def main():
     )
     args = parser.parse_args()
 
-    # Reduce noisy logs when quiet mode is requested
-    if args.quiet:
-        logging.basicConfig(level=logging.WARNING)
-        for logger_name in ("httpx", "sentence_transformers", "huggingface_hub", "transformers", "retrieval"):
-            logging.getLogger(logger_name).setLevel(logging.WARNING)
-        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
-    rag_root = Path(__file__).resolve().parents[1]
-    retrieval = load_retrieval_module(rag_root)
-    structured = load_structured_retrieval_module(rag_root)
-
-    db_path = (rag_root / args.db_path).resolve() if not Path(args.db_path).is_absolute() else Path(args.db_path)
-
-    loaded_retrieval = False
-    meta = None
-    faiss_idx = None
-    embeddings = None
-    model = None
-
-    def ensure_retrieval_loaded():
-        nonlocal loaded_retrieval, meta, faiss_idx, embeddings, model
-        if loaded_retrieval:
-            return
-
-        out_dir = Path(args.out)
-        meta = retrieval.load_metadata(out_dir / retrieval.METADATA_FILENAME)
-        faiss_idx = None
-        embeddings = None
-        if getattr(retrieval, '_HAS_FAISS', False) and (out_dir / retrieval.FAISS_INDEX_FILENAME).exists():
-            faiss_idx = retrieval.load_faiss_index(out_dir / retrieval.FAISS_INDEX_FILENAME)
-        else:
-            embeddings = retrieval.load_embeddings_np(out_dir / retrieval.EMBEDDINGS_FILENAME)
-
-        print("Loading embedding model (only once)...")
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            model = retrieval.load_embedding_model()
-        print("Ready. Retrieval loaded.")
-        loaded_retrieval = True
+    engine = RAGEngine(
+        out=args.out,
+        db_path=args.db_path,
+        api_base_url=args.api_base_url,
+        api_key_env=args.api_key_env,
+        model=args.model,
+        quiet=args.quiet,
+        k=args.k,
+        structured_mode=args.structured_mode,
+    )
 
     def handle_query(q: str):
-        if structured.should_route_to_courses_db(q):
-            course_answer = structured.answer_course_query(q, db_path)
-            if course_answer is not None:
-                final_answer = render_structured_answer(q, course_answer, args)
-                print()
-                print(f'Απάντηση: "{final_answer}"')
-                if args.show_chunks and not args.quiet:
-                    print("DB source:")
-                    print(
-                        f"table={course_answer.get('source_table')} "
-                        f"course_id={course_answer.get('course_id')} "
-                        f"intent={course_answer.get('intent')} "
-                        f"score={course_answer.get('score'):.2f}"
-                    )
-                return
-
-        if structured.should_route_to_staff_db(q):
-            structured_answer = structured.answer_staff_query(q, db_path)
-            if structured_answer is not None:
-                final_answer = render_structured_answer(q, structured_answer, args)
-                print()
-                print(f'Απάντηση: "{final_answer}"')
-                if args.show_chunks and not args.quiet:
-                    print("DB source:")
-                    print(
-                        f"table={structured_answer.get('source_table')} "
-                        f"staff_id={structured_answer.get('staff_id')} "
-                        f"score={structured_answer.get('score'):.2f}"
-                    )
-                return
-
-        ensure_retrieval_loaded()
-        t0 = time()
-        res = retrieval.retrieve(q, model, faiss_idx, embeddings, meta, top_k=args.k)
-        dt = time() - t0
-        if not args.quiet:
-            print(f"Retrieved {len(res['results'])} chunks in {dt:.2f}s")
-        context = res.get("context", "")
-        prompt = build_prompt_from_context(context, q)
-        try:
-            api_key = os.environ.get(args.api_key_env, "").strip()
-            if not api_key:
-                print(f"Missing API key in env var: {args.api_key_env}")
-                return
-            answer = openai_chat(args.api_base_url, api_key, args.model, prompt)
-        except Exception as e:
-            print("OpenAI call failed:", e)
+        result = engine.answer_query(q)
+        clean_answer = (result.get("answer") or "").strip()
+        if not clean_answer:
+            err = result.get("error") or "No answer"
+            print(err)
             return
-        # print the answer clearly: blank line + label
-        clean_answer = answer.strip()
+
         print()
         print(f'Απάντηση: "{clean_answer}"')
 
         # Optionally print the individual retrieved chunks
         if args.show_chunks:
-            results = res.get('results', [])
-            def _format_chunk(item, idx):
-                # extract common fields from different retrieval shapes
-                score = item.get('score') if isinstance(item, dict) else None
-                ridx = item.get('index') if isinstance(item, dict) else None
-                meta = item.get('meta', {}) if isinstance(item, dict) else {}
-                source = item.get('source') or meta.get('source') or meta.get('filename')
-                section = meta.get('section') or item.get('section')
-
-                # get the best available text field
-                text = None
-                for k in ('retrieval_text', 'text', 'content', 'chunk'):
-                    if isinstance(item, dict) and k in item and isinstance(item[k], str):
-                        text = item[k]
-                        break
-                if not text and isinstance(meta, dict):
-                    text = meta.get('text') or meta.get('content')
-
-                if text is None:
-                    text = json.dumps(item, ensure_ascii=False)
-
-                # pretty format
-                header = f"Chunk {idx}"
-                lines = []
-                lines.append("" + "=" * 60)
-                lines.append(f"{header}  (retrieval_index={ridx}  score={score})")
-                if source:
-                    lines.append(f"Source: {source}")
-                if section:
-                    lines.append(f"Section: {section}")
-                lines.append("")
-                # wrap text for console width
-                wrapped = textwrap.fill(text.strip(), width=100)
-                lines.append(wrapped)
-                lines.append("" + "=" * 60)
-                return "\n".join(lines)
+            results = result.get("chunks", [])
 
             if not args.quiet:
                 print("Retrieved chunks:")
             for i, it in enumerate(results, start=1):
-                print(_format_chunk(it, i))
+                print(format_chunk(it, i))
 
     if args.query:
         handle_query(args.query)
