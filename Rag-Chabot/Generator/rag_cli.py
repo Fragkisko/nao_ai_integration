@@ -166,6 +166,7 @@ class RAGEngine:
         quiet: bool = True,
         k: int = 5,
         structured_mode: str = "llm",
+        preload_retrieval_on_boot: bool = True,
     ) -> None:
         self.out = out
         self.db_path_arg = db_path
@@ -175,6 +176,7 @@ class RAGEngine:
         self.quiet = quiet
         self.k = k
         self.structured_mode = structured_mode
+        self.preload_retrieval_on_boot = preload_retrieval_on_boot
 
         _load_dotenv_from_parents(Path(__file__).resolve().parent)
 
@@ -196,6 +198,12 @@ class RAGEngine:
         self.faiss_idx = None
         self.embeddings = None
         self.model = None
+
+        if self.preload_retrieval_on_boot:
+            try:
+                self._ensure_retrieval_loaded()
+            except Exception as e:
+                print(f"[WARN] Retrieval preload on boot failed: {e}")
 
     def _resolve_path(self, raw_path: str) -> Path:
         path_obj = Path(raw_path)

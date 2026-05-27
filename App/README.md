@@ -2,6 +2,24 @@
 
 Αυτό το αρχείο περιγράφει τις μεταβλητές περιβάλλοντος που χρησιμοποιεί το project και παραδείγματα εκτέλεσης.
 
+## Modular δομή (χωρίς αλλαγή στο run command)
+
+Το project χωρίστηκε σε μικρότερα αρχεία για ευκολότερη συντήρηση, αλλά το entrypoint παραμένει ίδιο:
+
+```powershell
+python .\App\main.py
+```
+
+Νέα αρχεία στον φάκελο `App`:
+
+- `main.py`: orchestrator του app loop (menu, input routing, reply flow).
+- `settings.py`: φόρτωση `.env`, CLI overrides (`--nao-ip`, `--nao-port`) και συγκέντρωση ρυθμίσεων.
+- `speech_to_text.py`: VOSK loading, push-to-talk, transcoding και file transcription.
+- `nao_service.py`: remote NAO recording flow (ssh/scp) + μεταγραφή.
+- `rag_service.py`: φόρτωση `rag_cli.py`, init του RAG engine και query execution.
+
+Με αυτό το split, κρατάμε ίδια λειτουργικότητα αλλά έχουμε καθαρό separation of concerns.
+
 ## Σημαντικές μεταβλητές περιβάλλοντος
 
 - `NAO_IP` : IP διεύθυνση του NAO (π.χ. `192.168.1.42`). Προεπιλογή: `127.0.0.1`.
@@ -16,6 +34,7 @@
   - `MAX_TTS_LEN` : Μέγιστο μήκος κειμένου για TTS (χαρακτήρες). Προεπιλογή: `250`.
   - `RAG_MODEL` : RAG model override. Προεπιλογή: `gpt-4o-mini`.
   - `RAG_TOP_K` : Πόσα αποτελέσματα RAG να χρησιμοποιηθούν. Προεπιλογή: `5`.
+  - `RAG_PRELOAD_RETRIEVAL_ON_BOOT` : Αν είναι `1/true`, φορτώνει embedding retrieval resources στο startup για να μην υπάρχει καθυστέρηση στο πρώτο document query. Προεπιλογή: `1`.
   - `RAG_DEBUG_CHUNKS` : 0/1 or true/false για εκτύπωση chunks.
 
 - Optional tuning:
@@ -137,6 +156,7 @@ python -c "from vosk import Model; m=Model(r'C:\Users\frag2\Documents\Diplomatik
 
 - `RAG_MODEL` : override για το RAG model (π.χ. `gpt-4o-mini`).
 - `RAG_TOP_K` : αριθμός κορυφαίων chunks για RAG (default `5`).
+- `RAG_PRELOAD_RETRIEVAL_ON_BOOT` : αν είναι `1/true`, κάνει preload το embedding model + retrieval index στο startup (default `1`).
 - `RAG_DEBUG_CHUNKS` : ενεργοποιεί εκτύπωση chunks (0/1).
 - `VOSK_MODEL_PATH` : path στον φάκελο του VOSK μοντέλου (π.χ. `C:\...\vosk-model-el-gr-0.7`).
 - `SOUNDDEVICE_DEVICE` : (προαιρετικό) index της εισόδου ήχου για `sounddevice`.
@@ -144,6 +164,10 @@ python -c "from vosk import Model; m=Model(r'C:\Users\frag2\Documents\Diplomatik
 - `NAO_IP` / `NAO_PORT` : διεύθυνση/θύρα του NAO — μπορούν να δοθούν και ως CLI args `--nao-ip`/`--nao-port`.
 - `NAO_RECORD_SEC` : πόσα δευτερόλεπτα θα εγγράψει ο NAO (default `5`).
 - `NAO_PREP_SEC` : προ-προετοιμασία σεδ (countdown) πριν το remote recording (default `3`).
+- `PUSH_MAX_SECONDS` : μέγιστη διάρκεια για το push-to-talk (mode `v`). Προεπιλογή `15` δευτερόλεπτα. Η εγγραφή θα τερματιστεί αυτόματα μετά από αυτό το όριο.
+- `STT_BACKEND` : επιλέγει backend για offline STT (`vosk` ή `whispercpp`). Προεπιλογή `vosk`.
+- `WHISPERCPP_BIN` : διαδρομή στο εκτελέσιμο `whisper.cpp` (όταν `STT_BACKEND=whispercpp`).
+- `WHISPERCPP_MODEL` : διαδρομή στο ggml μοντέλο για `whisper.cpp`.
 
 ### Προαπαιτούμενα για κάθε mode
 
@@ -155,6 +179,14 @@ python -c "from vosk import Model; m=Model(r'C:\Users\frag2\Documents\Diplomatik
 - Αν η μεταγραφή από NAO είναι κενή, το αρχείο WAV αποθηκεύεται σε `Tests/nao_last.wav` για επιθεώρηση.
 - Αν το `VOSK` ή το μοντέλο δεν είναι διαθέσιμα, το `v` mode θα εμφανίσει προειδοποίηση και θα προτείνει χρήση `k`.
 - Αν δεν υπάρχει `ffmpeg` και το αρχείο ήχου δεν είναι απλό WAV, το πρόγραμμα θα προτείνει την εγκατάσταση των Python libs (`soundfile numpy scipy`) ή `ffmpeg`.
+
+### Όριο push-to-talk
+
+- Το `v` mode (push-to-talk) σταματάει όταν πατήσεις ξανά Enter ή όταν φτάσει το όριο `PUSH_MAX_SECONDS` (default `15s`). Μπορείς να αλλάξεις `PUSH_MAX_SECONDS` στο `.env` ή στο περιβάλλον πριν τρέξεις το script.
+
+### Whisper.cpp (προαιρετικά)
+
+- Αν θέλεις να χρησιμοποιήσεις `whisper.cpp` για την μεταγραφή αρχείων (π.χ. για καλύτερη ποιότητα στα Ελληνικά), όρισε `STT_BACKEND=whispercpp` και ρύθμισε `WHISPERCPP_BIN` και `WHISPERCPP_MODEL` στο `.env`. Το `main.py` θα καλέσει το εκτελέσιμο για να κάνει το local transcription των WAV αρχείων που λαμβάνονται από τον NAO.
 
 ### Παραδείγματα εκτέλεσης
 
@@ -175,3 +207,4 @@ python App\main.py
 ```
 
 Σημείωση: μπορείς επίσης να περάσεις `--nao-ip` και `--nao-port` στο `python App/main.py` για προσωρινή παράκαμψη.
+Για το v ωστε να βρισκει το μικροφωνο : python -c "import sounddevice as sd; print(sd.query_devices())"
