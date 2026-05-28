@@ -95,9 +95,26 @@ pip install sounddevice vosk python-dotenv
 ```
 VOSK_MODEL_PATH=C:\Users\frag2\Documents\Diplomatiki_NAO\vosk-model-el-gr-0.7
 SOUNDDEVICE_DEVICE=30
+STT_VOCAB=διπαε,δι.πα.ε,παπαδοπουλος,νικολαου
+STT_VOCAB_DIR=C:\Users\frag2\Documents\Diplomatiki_NAO\controllers\nao_ai_integration\App\stt_vocab
+STT_VOCAB_PROFILE=all
 ```
 
 `SOUNDDEVICE_DEVICE` είναι προαιρετικό και μπορεί να είναι ο αριθμητικός index συσκευής εισόδου που βρήκες με `sounddevice.query_devices()` (βλέπε παρακάτω). Αν δεν το ορίσεις, το script χρησιμοποιεί την προεπιλεγμένη είσοδο του συστήματος.
+`STT_VOCAB` είναι προαιρετικό και δέχεται custom λέξεις/ονόματα χωρισμένα με κόμμα για VOSK vocabulary injection.
+`STT_VOCAB_DIR` είναι προαιρετικό και δείχνει σε φάκελο λεξιλογίων με αρχεία `common.txt`, `professors.txt`, `courses.txt`.
+`STT_VOCAB_PROFILE` ορίζει ποιο group θα φορτώνεται: `all`, `professor`, `course`, `common`.
+`STT_VOCAB_FILE` παραμένει διαθέσιμο για backward compatibility (single `.txt`/`.json` αρχείο).
+
+Προτεινόμενη οργάνωση:
+
+```
+App/
+  stt_vocab/
+    common.txt
+    professors.txt
+    courses.txt
+```
 
 Έλεγχος μικροφώνου / index συσκευής:
 
@@ -160,6 +177,10 @@ python -c "from vosk import Model; m=Model(r'C:\Users\frag2\Documents\Diplomatik
 - `RAG_DEBUG_CHUNKS` : ενεργοποιεί εκτύπωση chunks (0/1).
 - `VOSK_MODEL_PATH` : path στον φάκελο του VOSK μοντέλου (π.χ. `C:\...\vosk-model-el-gr-0.7`).
 - `SOUNDDEVICE_DEVICE` : (προαιρετικό) index της εισόδου ήχου για `sounddevice`.
+- `STT_VOCAB` : (προαιρετικό) comma-separated custom λέξεις/ονόματα για VOSK grammar injection.
+- `STT_VOCAB_DIR` : (προαιρετικό) φάκελος με `common.txt`, `professors.txt`, `courses.txt`.
+- `STT_VOCAB_PROFILE` : (προαιρετικό) `all|professor|course|common`.
+- `STT_VOCAB_FILE` : (προαιρετικό) path σε `.txt`/`.json` με custom vocabulary για VOSK.
 - `NAO_USER` : χρήστης για SSH στο NAO (default `nao`).
 - `NAO_IP` / `NAO_PORT` : διεύθυνση/θύρα του NAO — μπορούν να δοθούν και ως CLI args `--nao-ip`/`--nao-port`.
 - `NAO_RECORD_SEC` : πόσα δευτερόλεπτα θα εγγράψει ο NAO (default `5`).

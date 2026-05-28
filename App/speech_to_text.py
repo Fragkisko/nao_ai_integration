@@ -7,7 +7,7 @@ import threading
 import time
 import wave
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, List, Optional
 
 try:
     import soundfile as sf
@@ -62,7 +62,126 @@ def configure_input_device_from_env() -> None:
         print(f"[WARN] Invalid SOUNDDEVICE_DEVICE value: {e}")
 
 
-def transcribe_push_to_talk(model, samplerate: int = 16000, max_seconds: Optional[int] = None) -> str:
+def _normalize_vocab_entries(items: Iterable[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for raw in items:
+        token = (raw or "").strip().lower()
+        if not token:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _load_vocab_file_entries(vocab_file: str) -> List[str]:
+    path = Path(vocab_file)
+    if not path.exists():
+        print(f"[WARN] STT vocab file not found: {vocab_file}")
+        return []
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as e:
+        print(f"[WARN] Cannot read STT vocab file {vocab_file}: {e}")
+        return []
+
+    if path.suffix.lower() == ".json":
+        try:
+            data = json.loads(text)
+            if isinstance(data, list):
+                return [str(x) for x in data]
+            if isinstance(data, dict) and isinstance(data.get("phrases"), list):
+                return [str(x) for x in data["phrases"]]
+            print("[WARN] JSON vocab file must be an array or an object with a 'phrases' array")
+            return []
+        except Exception as e:
+            print(f"[WARN] Invalid JSON vocab file {vocab_file}: {e}")
+            return []
+
+    entries: List[str] = []
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        entries.extend(parts)
+    return entries
+
+
+def _resolve_vocab_files_from_env() -> List[Path]:
+    base_dir = Path(__file__).resolve().parent
+    vocab_dir_raw = os.environ.get("STT_VOCAB_DIR", "").strip()
+    profile_raw = os.environ.get("STT_VOCAB_PROFILE", "all").strip().lower()
+
+    profile_map = {
+        "all": ["common.txt", "professors.txt", "courses.txt"],
+        "professor": ["common.txt", "professors.txt"],
+        "professors": ["common.txt", "professors.txt"],
+        "course": ["common.txt", "courses.txt"],
+        "courses": ["common.txt", "courses.txt"],
+        "common": ["common.txt"],
+    }
+
+    selected_profile = profile_raw if profile_raw in profile_map else "all"
+    if profile_raw and profile_raw not in profile_map:
+        print(f"[WARN] Unknown STT_VOCAB_PROFILE='{profile_raw}', using 'all'")
+
+    resolved_files: List[Path] = []
+    if vocab_dir_raw:
+        vocab_dir = Path(vocab_dir_raw)
+        if not vocab_dir.is_absolute():
+            vocab_dir = (base_dir / vocab_dir).resolve()
+        for name in profile_map[selected_profile]:
+            resolved_files.append(vocab_dir / name)
+
+    legacy_vocab_file = os.environ.get("STT_VOCAB_FILE", "").strip()
+    if legacy_vocab_file:
+        resolved_files.append(Path(legacy_vocab_file))
+
+    return resolved_files
+
+
+def load_custom_vocabulary_from_env() -> List[str]:
+    """Load optional STT vocabulary from env vars for Vosk grammar injection.
+
+    Supported env vars:
+    - STT_VOCAB: comma-separated words/phrases.
+    - STT_VOCAB_DIR: directory containing common.txt/professors.txt/courses.txt.
+    - STT_VOCAB_PROFILE: all|professor|course|common.
+    - STT_VOCAB_FILE: .txt or .json file with extra vocabulary.
+    """
+    inline_raw = os.environ.get("STT_VOCAB", "")
+
+    inline_entries = [p.strip() for p in inline_raw.split(",")] if inline_raw else []
+    file_entries: List[str] = []
+    for vocab_path in _resolve_vocab_files_from_env():
+        file_entries.extend(_load_vocab_file_entries(str(vocab_path)))
+
+    return _normalize_vocab_entries([*inline_entries, *file_entries])
+
+
+def _build_vosk_recognizer(model, samplerate: int, custom_vocabulary: Optional[List[str]] = None):
+    vocab = _normalize_vocab_entries(custom_vocabulary or load_custom_vocabulary_from_env())
+    if not vocab:
+        return vosk.KaldiRecognizer(model, samplerate)
+
+    # Keep [unk] so recognizer can still emit unseen words.
+    grammar_words = _normalize_vocab_entries([*vocab, "[unk]"])
+    try:
+        grammar_json = json.dumps(grammar_words, ensure_ascii=False)
+        print(f"[INFO] STT vocabulary injection active ({len(vocab)} entries)")
+        return vosk.KaldiRecognizer(model, samplerate, grammar_json)
+    except Exception as e:
+        print(f"[WARN] Failed to apply STT vocabulary injection: {e}")
+        return vosk.KaldiRecognizer(model, samplerate)
+
+
+def transcribe_push_to_talk(
+    model,
+    samplerate: int = 16000,
+    max_seconds: Optional[int] = None,
+    custom_vocabulary: Optional[List[str]] = None,
+) -> str:
     if model is None or not VOSK_AVAILABLE:
         raise RuntimeError("VOSK unavailable")
 
@@ -72,7 +191,7 @@ def transcribe_push_to_talk(model, samplerate: int = 16000, max_seconds: Optiona
     except Exception:
         device_sr = samplerate
 
-    rec = vosk.KaldiRecognizer(model, device_sr)
+    rec = _build_vosk_recognizer(model, device_sr, custom_vocabulary=custom_vocabulary)
     audio_queue: "queue.Queue[bytes]" = queue.Queue()
 
     def callback(indata, frames, time_info, status):
@@ -217,7 +336,12 @@ def _ensure_wav_from_any(src_path: str, target_sr: int = 16000) -> str:
     return tmp_path
 
 
-def transcribe_file_with_vosk(model, filepath: str, samplerate: int = 16000) -> str:
+def transcribe_file_with_vosk(
+    model,
+    filepath: str,
+    samplerate: int = 16000,
+    custom_vocabulary: Optional[List[str]] = None,
+) -> str:
     if model is None or not VOSK_AVAILABLE:
         raise RuntimeError("VOSK unavailable")
 
@@ -235,7 +359,7 @@ def transcribe_file_with_vosk(model, filepath: str, samplerate: int = 16000) -> 
 
     try:
         with wave.open(ok_path, "rb") as wf:
-            rec = vosk.KaldiRecognizer(model, wf.getframerate())
+            rec = _build_vosk_recognizer(model, wf.getframerate(), custom_vocabulary=custom_vocabulary)
             while True:
                 data = wf.readframes(4000)
                 if len(data) == 0:
