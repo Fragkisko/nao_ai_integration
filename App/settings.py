@@ -60,6 +60,8 @@ class AppSettings:
     rag_fallback_reply: str
     vosk_model_path: str
     push_max_seconds: int
+    stt_debug_log_enabled: bool
+    stt_debug_log_path: str
 
 
 def build_settings() -> AppSettings:
@@ -74,4 +76,9 @@ def build_settings() -> AppSettings:
             str(PROJECT_ROOT / "models" / "vosk-model-gr"),
         ),
         push_max_seconds=_env_int("PUSH_MAX_SECONDS", 15),
+        stt_debug_log_enabled=_env_bool("STT_DEBUG_LOG_ENABLED", True),
+        stt_debug_log_path=os.environ.get(
+            "STT_DEBUG_LOG_PATH",
+            str(PROJECT_ROOT / "Tests" / "stt_debug_log.csv"),
+        ),
     )

@@ -164,10 +164,27 @@ python -c "from vosk import Model; m=Model(r'C:\Users\frag2\Documents\Diplomatik
 
 - `k`: πληκτρολόγιο — πληκτρολογείς το κείμενο απευθείας.
 - `v`: φωνή (push-to-talk) — χρησιμοποιεί offline VOSK + `sounddevice` για εγγραφή και μεταγραφή.
+- `vs`: φωνή μόνο STT (debug) — ίδια καταγραφή με `v`, αλλά δεν καλεί RAG/AI, εκτυπώνει μόνο το transcript.
 - `n`: NAO (remote) — ξεκινάει απομακρυσμένη εγγραφή στον ρομπότ μέσω `ssh`, κατεβάζει το WAV με `scp` και το μεταγράφει τοπικά.
 - `q`: έξοδος
 
 Το πρόγραμμα παίρνει το παραγόμενο `user_text` και το στέλνει στη RAG engine (`rag_engine.answer_query()`), μορφώνει την απάντηση και την εκφωνεί με `nao_say()`.
+
+Για καθαρό STT debugging χωρίς AI intent interpretation, χρησιμοποίησε το mode `vs`.
+
+Επιπλέον, το app γράφει CSV debug log για τα STT runs (`v` και `vs`) με πεδία:
+- `timestamp`
+- `mode`
+- `stt_text`
+- `rag_answer` (κενό στο `vs`)
+- `rag_error` (κενό όταν δεν υπάρχει)
+
+Επίσης, το `App/transcribe_wav.py` μπορεί να συγκρίνει με/χωρίς vocab injection:
+
+```powershell
+python .\App\transcribe_wav.py --file .\Tests\nao_last.wav
+python .\App\transcribe_wav.py --file .\Tests\nao_last.wav --no-vocab
+```
 
 ### Σημαντικές μεταβλητές περιβάλλοντος που επηρεάζουν το `main.py`
 
@@ -181,6 +198,8 @@ python -c "from vosk import Model; m=Model(r'C:\Users\frag2\Documents\Diplomatik
 - `STT_VOCAB_DIR` : (προαιρετικό) φάκελος με `common.txt`, `professors.txt`, `courses.txt`.
 - `STT_VOCAB_PROFILE` : (προαιρετικό) `all|professor|course|common`.
 - `STT_VOCAB_FILE` : (προαιρετικό) path σε `.txt`/`.json` με custom vocabulary για VOSK.
+- `STT_DEBUG_LOG_ENABLED` : (προαιρετικό) αν είναι `1/true`, ενεργοποιεί CSV log για STT debug. Προεπιλογή `true`.
+- `STT_DEBUG_LOG_PATH` : (προαιρετικό) path του CSV debug log. Προεπιλογή `Tests/stt_debug_log.csv`.
 - `NAO_USER` : χρήστης για SSH στο NAO (default `nao`).
 - `NAO_IP` / `NAO_PORT` : διεύθυνση/θύρα του NAO — μπορούν να δοθούν και ως CLI args `--nao-ip`/`--nao-port`.
 - `NAO_RECORD_SEC` : πόσα δευτερόλεπτα θα εγγράψει ο NAO (default `5`).

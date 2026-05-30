@@ -1,4 +1,7 @@
 import subprocess
+from csv import DictWriter
+from datetime import datetime
+from pathlib import Path
 from settings import apply_cli_overrides, build_settings, load_dotenv_from_project_root
 
 load_dotenv_from_project_root()
@@ -20,6 +23,40 @@ from speech_to_text import (
 )
 
 
+def _append_stt_debug_row(settings, *, mode: str, stt_text: str, rag_answer: str = "", rag_error: str = "") -> None:
+    if not settings.stt_debug_log_enabled:
+        return
+
+    log_path = Path(settings.stt_debug_log_path)
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not log_path.exists()
+        with log_path.open("a", encoding="utf-8", newline="") as fp:
+            writer = DictWriter(
+                fp,
+                fieldnames=[
+                    "timestamp",
+                    "mode",
+                    "stt_text",
+                    "rag_answer",
+                    "rag_error",
+                ],
+            )
+            if write_header:
+                writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "mode": mode,
+                    "stt_text": stt_text,
+                    "rag_answer": rag_answer,
+                    "rag_error": rag_error,
+                }
+            )
+    except Exception as e:
+        print(f"[WARN] STT debug log write failed: {e}")
+
+
 def main():
     settings = build_settings()
     rag_module, rag_engine = init_rag_engine(
@@ -32,6 +69,9 @@ def main():
     print(f"RAG model={settings.rag_model}")
     print(f"RAG preload retrieval on boot={settings.rag_preload_retrieval_on_boot}")
     print(f"RAG debug chunks={settings.rag_debug_chunks}")
+    print(f"STT debug log enabled={settings.stt_debug_log_enabled}")
+    if settings.stt_debug_log_enabled:
+        print(f"STT debug log path={settings.stt_debug_log_path}")
 
     vosk_available = VOSK_AVAILABLE
     vosk_model = None
@@ -43,7 +83,7 @@ def main():
     if vosk_available:
         configure_input_device_from_env()
 
-    print("Επιλογές εισόδου: (k) πληκτρολόγιο / (v) φωνή / (n) NAO (test) / (q) έξοδος")
+    print("Επιλογές εισόδου: (k) πληκτρολόγιο / (v) φωνή / (vs) φωνή μόνο STT (debug) / (n) NAO (test) / (q) έξοδος")
 
     while True:
         try:
@@ -61,7 +101,7 @@ def main():
                 break
             if not user_text:
                 continue
-        elif mode == "v":
+        elif mode in {"v", "vs"}:
             if not vosk_available or vosk_model is None:
                 print("[WARN] Φωνητική είσοδος μη διαθέσιμη — επίλεξε πληκτρολόγιο.")
                 continue
@@ -74,12 +114,16 @@ def main():
                 print("[WARN] Δεν ανιχνεύτηκε κείμενο στην εγγραφή.")
                 continue
             print("Καταγραφή:", user_text)
+            if mode == "vs":
+                _append_stt_debug_row(settings, mode=mode, stt_text=user_text)
+                print("[DEBUG] STT-only mode: παράλειψη RAG/AI απάντησης.")
+                continue
         elif mode == "n":
             user_text = run_nao_record_and_transcribe(vosk_model, NAO_IP, NAO_PORT)
             if not user_text:
                 continue
         else:
-            print("Άγνωστη επιλογή — πάτα k, v, n ή q")
+            print("Άγνωστη επιλογή — πάτα k, v, vs, n ή q")
             continue
 
         rag_result = answer_query(rag_engine, user_text)
@@ -89,10 +133,20 @@ def main():
                 print(rag_module.format_chunk(item, i))
 
         reply = (rag_result.get("answer") or "").strip()
+        rag_error = rag_result.get("error") or ""
         if not reply:
-            if rag_result.get("error"):
-                print(f"[WARN] {rag_result['error']}")
+            if rag_error:
+                print(f"[WARN] {rag_error}")
             reply = settings.rag_fallback_reply
+
+        if mode in {"v", "vs"}:
+            _append_stt_debug_row(
+                settings,
+                mode=mode,
+                stt_text=user_text,
+                rag_answer=reply,
+                rag_error=rag_error,
+            )
 
         print("NAO:", reply)
 
