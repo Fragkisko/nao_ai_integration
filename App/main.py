@@ -16,8 +16,10 @@ from nao_common import (
 from nao_service import run_nao_record_and_transcribe
 from rag_service import answer_query, init_rag_engine
 from speech_to_text import (
+    WHISPER_AVAILABLE,
     VOSK_AVAILABLE,
     configure_input_device_from_env,
+    load_whisper_model,
     load_vosk_model,
     transcribe_push_to_talk,
 )
@@ -69,9 +71,17 @@ def main():
     print(f"RAG model={settings.rag_model}")
     print(f"RAG preload retrieval on boot={settings.rag_preload_retrieval_on_boot}")
     print(f"RAG debug chunks={settings.rag_debug_chunks}")
+    print(f"STT whisper model={settings.stt_whisper_model}")
     print(f"STT debug log enabled={settings.stt_debug_log_enabled}")
     if settings.stt_debug_log_enabled:
         print(f"STT debug log path={settings.stt_debug_log_path}")
+
+    whisper_available = WHISPER_AVAILABLE
+    whisper_model = None
+    if whisper_available:
+        whisper_model = load_whisper_model(settings.stt_whisper_model)
+        if whisper_model is None:
+            whisper_available = False
 
     vosk_available = VOSK_AVAILABLE
     vosk_model = None
@@ -80,7 +90,7 @@ def main():
         if vosk_model is None:
             vosk_available = False
 
-    if vosk_available:
+    if whisper_available:
         configure_input_device_from_env()
 
     print("Επιλογές εισόδου: (k) πληκτρολόγιο / (v) φωνή / (vs) φωνή μόνο STT (debug) / (n) NAO (test) / (q) έξοδος")
@@ -102,11 +112,11 @@ def main():
             if not user_text:
                 continue
         elif mode in {"v", "vs"}:
-            if not vosk_available or vosk_model is None:
+            if not whisper_available or whisper_model is None:
                 print("[WARN] Φωνητική είσοδος μη διαθέσιμη — επίλεξε πληκτρολόγιο.")
                 continue
             try:
-                user_text = transcribe_push_to_talk(vosk_model, max_seconds=settings.push_max_seconds)
+                user_text = transcribe_push_to_talk(whisper_model, max_seconds=settings.push_max_seconds)
             except Exception as e:
                 print(f"[WARN] STT error: {e}")
                 continue

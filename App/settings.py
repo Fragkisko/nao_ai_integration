@@ -58,6 +58,7 @@ class AppSettings:
     rag_preload_retrieval_on_boot: bool
     rag_debug_chunks: bool
     rag_fallback_reply: str
+    stt_whisper_model: str
     vosk_model_path: str
     push_max_seconds: int
     stt_debug_log_enabled: bool
@@ -71,6 +72,7 @@ def build_settings() -> AppSettings:
         rag_preload_retrieval_on_boot=_env_bool("RAG_PRELOAD_RETRIEVAL_ON_BOOT", True),
         rag_debug_chunks=_env_bool("RAG_DEBUG_CHUNKS", False),
         rag_fallback_reply="Δεν βρήκα αξιόπιστη απάντηση τώρα",
+        stt_whisper_model=os.environ.get("STT_WHISPER_MODEL", "small"),
         vosk_model_path=os.environ.get(
             "VOSK_MODEL_PATH",
             str(PROJECT_ROOT / "models" / "vosk-model-gr"),

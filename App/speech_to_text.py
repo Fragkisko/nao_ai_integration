@@ -23,13 +23,27 @@ except Exception:
 
 try:
     import sounddevice as sd
+
+    SOUNDDEVICE_AVAILABLE = True
+except Exception:
+    sd = None
+    SOUNDDEVICE_AVAILABLE = False
+
+try:
     import vosk
 
     VOSK_AVAILABLE = True
 except Exception:
-    sd = None
     vosk = None
     VOSK_AVAILABLE = False
+
+try:
+    from faster_whisper import WhisperModel
+
+    WHISPER_AVAILABLE = True
+except Exception:
+    WhisperModel = None
+    WHISPER_AVAILABLE = False
 
 
 def load_vosk_model(path: str):
@@ -47,8 +61,22 @@ def load_vosk_model(path: str):
         return None
 
 
+def load_whisper_model(model_name: str = "small"):
+    if not WHISPER_AVAILABLE:
+        print("[WARN] faster-whisper is not installed; voice input disabled")
+        return None
+
+    try:
+        print(f"Loading faster-whisper model '{model_name}' (may take a moment)...")
+        # Use FP16 when available; fallback to INT8 on CPU-only systems.
+        return WhisperModel(model_name, compute_type="auto")
+    except Exception as e:
+        print(f"[WARN] faster-whisper model load error: {e}")
+        return None
+
+
 def configure_input_device_from_env() -> None:
-    if not VOSK_AVAILABLE or sd is None:
+    if not SOUNDDEVICE_AVAILABLE or sd is None:
         return
 
     sounddevice_device = os.environ.get("SOUNDDEVICE_DEVICE")
@@ -182,8 +210,11 @@ def transcribe_push_to_talk(
     max_seconds: Optional[int] = None,
     custom_vocabulary: Optional[List[str]] = None,
 ) -> str:
-    if model is None or not VOSK_AVAILABLE:
-        raise RuntimeError("VOSK unavailable")
+    del custom_vocabulary  # Not used by faster-whisper.
+    if model is None or not WHISPER_AVAILABLE:
+        raise RuntimeError("Whisper STT unavailable")
+    if not SOUNDDEVICE_AVAILABLE or sd is None:
+        raise RuntimeError("sounddevice unavailable")
 
     try:
         dev_info = sd.query_devices(kind="input")
@@ -191,7 +222,6 @@ def transcribe_push_to_talk(
     except Exception:
         device_sr = samplerate
 
-    rec = _build_vosk_recognizer(model, device_sr, custom_vocabulary=custom_vocabulary)
     audio_queue: "queue.Queue[bytes]" = queue.Queue()
 
     def callback(indata, frames, time_info, status):
@@ -222,6 +252,7 @@ def transcribe_push_to_talk(
         thread.start()
 
         start_ts = time.time()
+        captured_frames: List[bytes] = []
         while not stopper.is_set():
             try:
                 data = audio_queue.get(timeout=0.1)
@@ -231,21 +262,74 @@ def transcribe_push_to_talk(
                     stopper.set()
                 continue
 
-            rec.AcceptWaveform(data)
+            captured_frames.append(data)
             if max_seconds is not None and (time.time() - start_ts) >= max_seconds:
                 print(f"[INFO] Push-to-talk: reached max {max_seconds}s, stopping.")
                 stopper.set()
 
         while not audio_queue.empty():
-            data = audio_queue.get()
-            rec.AcceptWaveform(data)
+            captured_frames.append(audio_queue.get())
 
-    final = rec.FinalResult()
-    try:
-        parsed = json.loads(final)
-        return parsed.get("text", "").strip()
-    except Exception:
+    if not captured_frames:
         return ""
+
+    tmpf = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_path = tmpf.name
+    tmpf.close()
+    try:
+        with wave.open(tmp_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(device_sr)
+            wf.writeframes(b"".join(captured_frames))
+
+        return transcribe_file_with_whisper(model, tmp_path, samplerate=samplerate)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def transcribe_file_with_whisper(
+    model,
+    filepath: str,
+    samplerate: int = 16000,
+    language: Optional[str] = None,
+) -> str:
+    if model is None or not WHISPER_AVAILABLE:
+        raise RuntimeError("Whisper STT unavailable")
+
+    chosen_language = (language or os.environ.get("STT_LANGUAGE", "el")).strip() or None
+
+    try:
+        ok_path = _ensure_wav_from_any(filepath, target_sr=samplerate)
+    except Exception as e:
+        try:
+            subprocess.check_call(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ok_path = _ffmpeg_resample_if_needed(filepath, target_sr=samplerate)
+        except Exception:
+            print(f"[WARN] cannot transcode file: {e}")
+            return ""
+
+    cleanup_path = ok_path if ok_path != filepath else None
+
+    try:
+        segments, _ = model.transcribe(
+            ok_path,
+            language=chosen_language,
+            vad_filter=True,
+        )
+        return " ".join((seg.text or "").strip() for seg in segments if (seg.text or "").strip()).strip()
+    except Exception as e:
+        print(f"[WARN] Whisper transcription failed: {e}")
+        return ""
+    finally:
+        if cleanup_path:
+            try:
+                os.remove(cleanup_path)
+            except Exception:
+                pass
 
 
 def _ffmpeg_resample_if_needed(src_path: str, target_sr: int = 16000) -> str:
