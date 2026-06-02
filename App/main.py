@@ -129,7 +129,10 @@ def main():
                 print("[DEBUG] STT-only mode: παράλειψη RAG/AI απάντησης.")
                 continue
         elif mode == "n":
-            user_text = run_nao_record_and_transcribe(vosk_model, NAO_IP, NAO_PORT)
+            if not whisper_available or whisper_model is None:
+                print("[WARN] NAO mode χρειάζεται Whisper STT αλλά δεν είναι διαθέσιμο.")
+                continue
+            user_text = run_nao_record_and_transcribe(whisper_model, NAO_IP, NAO_PORT)
             if not user_text:
                 continue
         else:

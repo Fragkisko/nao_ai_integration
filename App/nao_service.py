@@ -5,10 +5,10 @@ import tempfile
 import time
 from pathlib import Path
 
-from speech_to_text import transcribe_file_with_vosk
+from speech_to_text import transcribe_file_with_whisper
 
 
-def run_nao_record_and_transcribe(vosk_model, default_nao_ip: str, default_nao_port: int) -> str:
+def run_nao_record_and_transcribe(whisper_model, default_nao_ip: str, default_nao_port: int) -> str:
     """Run remote NAO recording and return transcribed text (or empty string)."""
     nao_user = os.environ.get("NAO_USER", "nao")
     nao_ip_runtime = os.environ.get("NAO_IP", default_nao_ip)
@@ -64,7 +64,7 @@ def run_nao_record_and_transcribe(vosk_model, default_nao_ip: str, default_nao_p
         return ""
 
     try:
-        user_text = transcribe_file_with_vosk(vosk_model, tmp_local_path)
+        user_text = transcribe_file_with_whisper(whisper_model, tmp_local_path)
     except Exception as e:
         print(f"[WARN] STT-from-NAO-file error: {e}")
         user_text = ""
