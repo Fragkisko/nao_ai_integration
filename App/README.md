@@ -163,8 +163,10 @@ python -c "from vosk import Model; m=Model(r'C:\Users\frag2\Documents\Diplomatik
 Το κύριο script είναι [App/main.py](App/main.py). Όταν τρέχεις το πρόγραμμα, εμφανίζεται μενού επιλογών εισόδου:
 
 - `k`: πληκτρολόγιο — πληκτρολογείς το κείμενο απευθείας.
-- `v`: φωνή (push-to-talk) — χρησιμοποιεί offline VOSK + `sounddevice` για εγγραφή και μεταγραφή.
+- `v`: φωνή (push-to-talk) — χρησιμοποιεί `sounddevice` για εγγραφή και `faster-whisper` για μεταγραφή.
 - `vs`: φωνή μόνο STT (debug) — ίδια καταγραφή με `v`, αλλά δεν καλεί RAG/AI, εκτυπώνει μόνο το transcript.
+- `vc`: continuous conversation mode (VAD) — συνεχής ακρόαση με καταστάσεις `LISTENING -> PROCESSING -> SPEAKING`.
+  Κατά το `SPEAKING` η είσοδος παγώνει ώστε να μην ακούει το σύστημα τη δική του εκφώνηση.
 - `n`: NAO (remote) — ξεκινάει απομακρυσμένη εγγραφή στον ρομπότ μέσω `ssh`, κατεβάζει το WAV με `scp` και το μεταγράφει τοπικά.
 - `q`: έξοδος
 
@@ -173,6 +175,7 @@ python -c "from vosk import Model; m=Model(r'C:\Users\frag2\Documents\Diplomatik
 Για καθαρό STT debugging χωρίς AI intent interpretation, χρησιμοποίησε το mode `vs`.
 
 Επιπλέον, το app γράφει CSV debug log για τα STT runs (`v` και `vs`) με πεδία:
+
 - `timestamp`
 - `mode`
 - `stt_text`
@@ -200,11 +203,22 @@ python .\App\transcribe_wav.py --file .\Tests\nao_last.wav --no-vocab
 - `STT_VOCAB_FILE` : (προαιρετικό) path σε `.txt`/`.json` με custom vocabulary για VOSK.
 - `STT_DEBUG_LOG_ENABLED` : (προαιρετικό) αν είναι `1/true`, ενεργοποιεί CSV log για STT debug. Προεπιλογή `true`.
 - `STT_DEBUG_LOG_PATH` : (προαιρετικό) path του CSV debug log. Προεπιλογή `Tests/stt_debug_log.csv`.
+- `STT_LANGUAGE` : γλώσσα μεταγραφής για Whisper (π.χ. `el`). Προεπιλογή `el`.
 - `NAO_USER` : χρήστης για SSH στο NAO (default `nao`).
 - `NAO_IP` / `NAO_PORT` : διεύθυνση/θύρα του NAO — μπορούν να δοθούν και ως CLI args `--nao-ip`/`--nao-port`.
 - `NAO_RECORD_SEC` : πόσα δευτερόλεπτα θα εγγράψει ο NAO (default `5`).
 - `NAO_PREP_SEC` : προ-προετοιμασία σεδ (countdown) πριν το remote recording (default `3`).
 - `PUSH_MAX_SECONDS` : μέγιστη διάρκεια για το push-to-talk (mode `v`). Προεπιλογή `15` δευτερόλεπτα. Η εγγραφή θα τερματιστεί αυτόματα μετά από αυτό το όριο.
+- `CONT_VAD_FRAME_MS` : frame size VAD σε ms. Προεπιλογή `30`.
+- `CONT_VAD_PREROLL_MS` : πόσο pre-roll κρατά πριν το speech start. Προεπιλογή `300`.
+- `CONT_VAD_MIN_SPEECH_MS` : ελάχιστη διάρκεια ομιλίας για αποστολή στο Whisper. Προεπιλογή `450`.
+- `CONT_VAD_SILENCE_MS` : διάρκεια σιωπής για κλείσιμο segment. Προεπιλογή `900`.
+- `CONT_VAD_MAX_SEGMENT_SEC` : μέγιστη διάρκεια segment. Προεπιλογή `12`.
+- `CONT_VAD_START_TRIGGER_FRAMES` : διαδοχικά voiced frames για start trigger. Προεπιλογή `3`.
+- `CONT_VAD_START_THRESHOLD_DB` : dB πάνω από noise floor για start. Προεπιλογή `12`.
+- `CONT_VAD_STOP_THRESHOLD_DB` : dB πάνω από noise floor για να θεωρείται speech σε εξέλιξη. Προεπιλογή `6`.
+- `CONT_VAD_CALIBRATION_SEC` : αρχικός χρόνος βαθμονόμησης noise floor. Προεπιλογή `1`.
+- `CONT_SPEAKING_TAIL_MS` : μικρό hold μετά την εκφώνηση πριν επιστρέψει σε LISTENING. Προεπιλογή `400`.
 - `STT_BACKEND` : επιλέγει backend για offline STT (`vosk` ή `whispercpp`). Προεπιλογή `vosk`.
 - `WHISPERCPP_BIN` : διαδρομή στο εκτελέσιμο `whisper.cpp` (όταν `STT_BACKEND=whispercpp`).
 - `WHISPERCPP_MODEL` : διαδρομή στο ggml μοντέλο για `whisper.cpp`.
@@ -212,6 +226,8 @@ python .\App\transcribe_wav.py --file .\Tests\nao_last.wav --no-vocab
 ### Προαπαιτούμενα για κάθε mode
 
 - `v` (φωνή): απαιτεί εγκατάσταση `vosk` και `sounddevice` και διαθέσιμο το μοντέλο στο `VOSK_MODEL_PATH`. Συνιστώ επίσης `soundfile`, `numpy`, `scipy` για fallback μετατροπές.
+- `v` (φωνή): απαιτεί `faster-whisper` + `sounddevice`.
+- `vc` (continuous): απαιτεί `faster-whisper` + `sounddevice` + `numpy/scipy` (για resampling σε native sample rate).
 - `n` (NAO): απαιτεί SSH πρόσβαση στον NAO, το helper script `/home/nao/nao_record.py` στο ρομπότ και `scp` για μεταφορά αρχείου. Το helper χρησιμοποιεί Python2 στο ρομπότ.
 
 ### Debugging & συμπεριφορά σφαλμάτων
@@ -223,6 +239,13 @@ python .\App\transcribe_wav.py --file .\Tests\nao_last.wav --no-vocab
 ### Όριο push-to-talk
 
 - Το `v` mode (push-to-talk) σταματάει όταν πατήσεις ξανά Enter ή όταν φτάσει το όριο `PUSH_MAX_SECONDS` (default `15s`). Μπορείς να αλλάξεις `PUSH_MAX_SECONDS` στο `.env` ή στο περιβάλλον πριν τρέξεις το script.
+
+### Continuous VAD mode
+
+- Το `vc` mode κρατά το μικρόφωνο ανοιχτό συνεχώς στο native sample rate της συσκευής.
+- Αν είναι ορισμένο `SOUNDDEVICE_DEVICE`, χρησιμοποιείται αυστηρά η συγκεκριμένη συσκευή (χωρίς silent fallback).
+- Η καταγραφή/ανίχνευση παγώνει στο `SPEAKING` state, άρα αποφεύγονται self-trigger loops από το TTS.
+- Τα events και metrics segment γράφονται στο ίδιο CSV debug log (`STT_DEBUG_LOG_PATH`) με `mode=vc`.
 
 ### Whisper.cpp (προαιρετικά)
 

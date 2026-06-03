@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import queue
 import subprocess
@@ -6,8 +7,10 @@ import tempfile
 import threading
 import time
 import wave
+from dataclasses import dataclass
+from collections import deque
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 try:
     import soundfile as sf
@@ -88,6 +91,337 @@ def configure_input_device_from_env() -> None:
         print(f"[INFO] sounddevice default device set to {sounddevice_device}")
     except Exception as e:
         print(f"[WARN] Invalid SOUNDDEVICE_DEVICE value: {e}")
+
+
+def resolve_input_device_from_env(*, strict: bool = False) -> Optional[int]:
+    """Resolve explicit input device index from env without silent fallback."""
+    if not SOUNDDEVICE_AVAILABLE or sd is None:
+        if strict:
+            raise RuntimeError("sounddevice unavailable")
+        return None
+
+    sounddevice_device = os.environ.get("SOUNDDEVICE_DEVICE")
+    if sounddevice_device is None or not sounddevice_device.strip():
+        return None
+
+    raw = sounddevice_device.strip()
+    try:
+        index = int(raw)
+    except Exception:
+        if strict:
+            raise RuntimeError(f"Invalid SOUNDDEVICE_DEVICE='{raw}' (must be integer index)")
+        print(f"[WARN] Invalid SOUNDDEVICE_DEVICE value: '{raw}'")
+        return None
+
+    try:
+        dev = sd.query_devices(index, kind="input")
+        print(
+            "[INFO] Using explicit input device "
+            f"index={index} name='{dev.get('name', 'unknown')}' "
+            f"native_sr={int(dev.get('default_samplerate', 0) or 0)}"
+        )
+        return index
+    except Exception as e:
+        if strict:
+            raise RuntimeError(f"Cannot use SOUNDDEVICE_DEVICE={index}: {e}")
+        print(f"[WARN] Cannot use SOUNDDEVICE_DEVICE={index}: {e}")
+        return None
+
+
+@dataclass(frozen=True)
+class ContinuousVADConfig:
+    frame_ms: int = 30
+    preroll_ms: int = 300
+    min_speech_ms: int = 450
+    silence_ms: int = 900
+    max_segment_seconds: int = 12
+    start_trigger_frames: int = 3
+    start_threshold_db: float = 12.0
+    stop_threshold_db: float = 6.0
+    calibration_seconds: float = 1.0
+    target_samplerate: int = 16000
+
+
+class ContinuousVADCapture:
+    """Capture utterances continuously from microphone using an RMS-based VAD."""
+
+    def __init__(
+        self,
+        config: Optional[ContinuousVADConfig] = None,
+        *,
+        device_index: Optional[int] = None,
+        logger: Optional[Callable[[str], None]] = None,
+    ):
+        if not SOUNDDEVICE_AVAILABLE or sd is None:
+            raise RuntimeError("sounddevice unavailable")
+        if not PY_AUDIO_FALLBACK_AVAILABLE or np is None or resample_poly is None:
+            raise RuntimeError("numpy/scipy are required for continuous VAD mode")
+
+        self.config = config or ContinuousVADConfig()
+        self.logger = logger or print
+        self.device_index = device_index
+
+        self.native_samplerate = self.config.target_samplerate
+        self.blocksize = max(1, int(self.native_samplerate * self.config.frame_ms / 1000))
+
+        self._audio_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=512)
+        self._capture_enabled = threading.Event()
+        self._capture_enabled.set()
+        self._stream = None
+
+    def _log(self, event: str, **fields: object) -> None:
+        parts = [f"event={event}"]
+        for key, val in fields.items():
+            parts.append(f"{key}={val}")
+        self.logger("[VAD] " + " ".join(parts))
+
+    def _clear_audio_queue(self) -> None:
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except Exception:
+                break
+
+    def set_capture_enabled(self, enabled: bool) -> None:
+        if enabled:
+            self._capture_enabled.set()
+            self._clear_audio_queue()
+            self._log("capture_enabled")
+            return
+
+        self._capture_enabled.clear()
+        self._clear_audio_queue()
+        self._log("capture_disabled")
+
+    def _audio_callback(self, indata, frames, time_info, status):
+        del frames, time_info
+        if status:
+            self._log("stream_status", status=str(status))
+        if not self._capture_enabled.is_set():
+            return
+
+        try:
+            self._audio_queue.put_nowait(bytes(indata))
+        except queue.Full:
+            self._log("queue_overflow", maxsize=self._audio_queue.maxsize)
+
+    def __enter__(self):
+        if self.device_index is None:
+            dev_info = sd.query_devices(kind="input")
+            device_for_stream = None
+        else:
+            dev_info = sd.query_devices(self.device_index, kind="input")
+            device_for_stream = self.device_index
+
+        self.native_samplerate = int(dev_info.get("default_samplerate", self.config.target_samplerate))
+        if self.native_samplerate <= 0:
+            raise RuntimeError(f"Invalid native samplerate from input device: {self.native_samplerate}")
+
+        self.blocksize = max(1, int(self.native_samplerate * self.config.frame_ms / 1000))
+        self._stream = sd.RawInputStream(
+            samplerate=self.native_samplerate,
+            blocksize=self.blocksize,
+            dtype="int16",
+            channels=1,
+            callback=self._audio_callback,
+            device=device_for_stream,
+        )
+
+        try:
+            self._stream.start()
+        except Exception as e:
+            msg = (
+                "Failed to open input stream "
+                f"device={self.device_index if self.device_index is not None else 'default'} "
+                f"native_sr={self.native_samplerate} blocksize={self.blocksize}: {e}"
+            )
+            self._log("stream_open_failed", error=msg)
+            raise RuntimeError(msg)
+
+        self._log(
+            "stream_opened",
+            device=self.device_index if self.device_index is not None else "default",
+            native_sr=self.native_samplerate,
+            blocksize=self.blocksize,
+            target_sr=self.config.target_samplerate,
+        )
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception as e:
+                self._log("stream_close_failed", error=str(e))
+            finally:
+                self._stream = None
+                self._log("stream_closed")
+
+    @staticmethod
+    def _rms_dbfs_from_pcm16(frame_bytes: bytes) -> float:
+        arr = np.frombuffer(frame_bytes, dtype=np.int16).astype(np.float32)
+        if arr.size == 0:
+            return -120.0
+        rms = float(np.sqrt(np.mean(arr * arr))) / 32768.0
+        rms = max(rms, 1e-9)
+        return 20.0 * math.log10(rms)
+
+    def _resample_pcm16(self, pcm_bytes: bytes, src_sr: int) -> bytes:
+        if src_sr == self.config.target_samplerate:
+            return pcm_bytes
+
+        arr = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        if arr.size == 0:
+            return pcm_bytes
+
+        resampled = resample_poly(arr, self.config.target_samplerate, src_sr)
+        clipped = np.clip(resampled, -1.0, 1.0)
+        return (clipped * 32767.0).astype(np.int16).tobytes()
+
+    def next_segment(self) -> Dict[str, object]:
+        """Block until an utterance segment is detected and return audio + metrics."""
+        frame_ms = self.config.frame_ms
+        max_preroll_frames = max(1, int(self.config.preroll_ms / frame_ms))
+        start_trigger_frames = max(1, self.config.start_trigger_frames)
+        min_speech_frames = max(1, int(self.config.min_speech_ms / frame_ms))
+        silence_stop_frames = max(1, int(self.config.silence_ms / frame_ms))
+        max_total_frames = max(1, int(self.config.max_segment_seconds * 1000 / frame_ms))
+        calibration_frames = max(1, int(self.config.calibration_seconds * 1000 / frame_ms))
+
+        preroll = deque(maxlen=max_preroll_frames)
+        segment_frames: List[bytes] = []
+
+        noise_floor_db = -55.0
+        calibration_buf: List[float] = []
+        speech_trigger_count = 0
+        speech_frame_count = 0
+        silence_frame_count = 0
+        total_frame_count = 0
+        in_speech = False
+        segment_start_ts = 0.0
+        end_reason = "unknown"
+
+        self._log("listening", noise_floor_db=round(noise_floor_db, 2))
+
+        while True:
+            frame = self._audio_queue.get(timeout=1.0)
+            dbfs = self._rms_dbfs_from_pcm16(frame)
+            total_frame_count += 1
+
+            if len(calibration_buf) < calibration_frames:
+                calibration_buf.append(dbfs)
+                if len(calibration_buf) == calibration_frames:
+                    calibration_sorted = sorted(calibration_buf)
+                    idx = max(0, int(0.8 * len(calibration_sorted)) - 1)
+                    noise_floor_db = calibration_sorted[idx]
+                    self._log("noise_calibrated", noise_floor_db=round(noise_floor_db, 2))
+
+            start_threshold = noise_floor_db + float(self.config.start_threshold_db)
+            stop_threshold = noise_floor_db + float(self.config.stop_threshold_db)
+
+            if not in_speech:
+                preroll.append(frame)
+                if dbfs >= start_threshold:
+                    speech_trigger_count += 1
+                else:
+                    speech_trigger_count = 0
+                    if dbfs < noise_floor_db + 3.0:
+                        noise_floor_db = 0.98 * noise_floor_db + 0.02 * dbfs
+
+                if speech_trigger_count >= start_trigger_frames:
+                    in_speech = True
+                    segment_start_ts = time.time()
+                    segment_frames.extend(list(preroll))
+                    speech_frame_count = len(preroll)
+                    silence_frame_count = 0
+                    self._log(
+                        "speech_started",
+                        threshold_db=round(start_threshold, 2),
+                        frame_count=speech_trigger_count,
+                    )
+                continue
+
+            segment_frames.append(frame)
+            if dbfs >= stop_threshold:
+                speech_frame_count += 1
+                silence_frame_count = 0
+            else:
+                silence_frame_count += 1
+
+            if silence_frame_count >= silence_stop_frames:
+                end_reason = "silence"
+                break
+
+            if total_frame_count >= max_total_frames:
+                end_reason = "max_duration"
+                break
+
+        elapsed = max(0.0, time.time() - segment_start_ts)
+        speech_ms = int(speech_frame_count * frame_ms)
+        raw_pcm = b"".join(segment_frames)
+        pcm = self._resample_pcm16(raw_pcm, self.native_samplerate)
+
+        metrics: Dict[str, object] = {
+            "duration_ms": int(elapsed * 1000),
+            "speech_ms": speech_ms,
+            "segment_ms": int(len(segment_frames) * frame_ms),
+            "frames": len(segment_frames),
+            "native_sr": self.native_samplerate,
+            "target_sr": self.config.target_samplerate,
+            "noise_floor_db": round(noise_floor_db, 2),
+            "end_reason": end_reason,
+        }
+
+        if speech_frame_count < min_speech_frames:
+            self._log("segment_discarded", reason="too_short", speech_ms=speech_ms, end_reason=end_reason)
+            return {
+                "discarded": True,
+                "audio_pcm16": b"",
+                "samplerate": self.config.target_samplerate,
+                "metrics": metrics,
+            }
+
+        self._log(
+            "segment_ready",
+            speech_ms=speech_ms,
+            segment_ms=metrics["segment_ms"],
+            end_reason=end_reason,
+        )
+        return {
+            "discarded": False,
+            "audio_pcm16": pcm,
+            "samplerate": self.config.target_samplerate,
+            "metrics": metrics,
+        }
+
+
+def transcribe_pcm16_with_whisper(
+    model,
+    audio_pcm16: bytes,
+    samplerate: int = 16000,
+    language: Optional[str] = None,
+) -> str:
+    if model is None or not WHISPER_AVAILABLE:
+        raise RuntimeError("Whisper STT unavailable")
+    if not audio_pcm16:
+        return ""
+
+    tmpf = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_path = tmpf.name
+    tmpf.close()
+    try:
+        with wave.open(tmp_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(samplerate)
+            wf.writeframes(audio_pcm16)
+        return transcribe_file_with_whisper(model, tmp_path, samplerate=samplerate, language=language)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 def _normalize_vocab_entries(items: Iterable[str]) -> List[str]:

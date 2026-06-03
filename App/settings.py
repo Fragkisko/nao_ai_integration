@@ -59,10 +59,21 @@ class AppSettings:
     rag_debug_chunks: bool
     rag_fallback_reply: str
     stt_whisper_model: str
+    stt_language: str
     vosk_model_path: str
     push_max_seconds: int
     stt_debug_log_enabled: bool
     stt_debug_log_path: str
+    continuous_vad_frame_ms: int
+    continuous_vad_preroll_ms: int
+    continuous_vad_min_speech_ms: int
+    continuous_vad_silence_ms: int
+    continuous_vad_max_segment_seconds: int
+    continuous_vad_start_trigger_frames: int
+    continuous_vad_start_threshold_db: int
+    continuous_vad_stop_threshold_db: int
+    continuous_vad_calibration_seconds: int
+    continuous_speaking_tail_ms: int
 
 
 def build_settings() -> AppSettings:
@@ -73,6 +84,7 @@ def build_settings() -> AppSettings:
         rag_debug_chunks=_env_bool("RAG_DEBUG_CHUNKS", False),
         rag_fallback_reply="Δεν βρήκα αξιόπιστη απάντηση τώρα",
         stt_whisper_model=os.environ.get("STT_WHISPER_MODEL", "small"),
+        stt_language=os.environ.get("STT_LANGUAGE", "el"),
         vosk_model_path=os.environ.get(
             "VOSK_MODEL_PATH",
             str(PROJECT_ROOT / "models" / "vosk-model-gr"),
@@ -83,4 +95,14 @@ def build_settings() -> AppSettings:
             "STT_DEBUG_LOG_PATH",
             str(PROJECT_ROOT / "Tests" / "stt_debug_log.csv"),
         ),
+        continuous_vad_frame_ms=_env_int("CONT_VAD_FRAME_MS", 30),
+        continuous_vad_preroll_ms=_env_int("CONT_VAD_PREROLL_MS", 300),
+        continuous_vad_min_speech_ms=_env_int("CONT_VAD_MIN_SPEECH_MS", 450),
+        continuous_vad_silence_ms=_env_int("CONT_VAD_SILENCE_MS", 900),
+        continuous_vad_max_segment_seconds=_env_int("CONT_VAD_MAX_SEGMENT_SEC", 12),
+        continuous_vad_start_trigger_frames=_env_int("CONT_VAD_START_TRIGGER_FRAMES", 3),
+        continuous_vad_start_threshold_db=_env_int("CONT_VAD_START_THRESHOLD_DB", 12),
+        continuous_vad_stop_threshold_db=_env_int("CONT_VAD_STOP_THRESHOLD_DB", 6),
+        continuous_vad_calibration_seconds=_env_int("CONT_VAD_CALIBRATION_SEC", 1),
+        continuous_speaking_tail_ms=_env_int("CONT_SPEAKING_TAIL_MS", 400),
     )
