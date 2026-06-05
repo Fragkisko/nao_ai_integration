@@ -167,6 +167,7 @@ python -c "from vosk import Model; m=Model(r'C:\Users\frag2\Documents\Diplomatik
 - `vs`: φωνή μόνο STT (debug) — ίδια καταγραφή με `v`, αλλά δεν καλεί RAG/AI, εκτυπώνει μόνο το transcript.
 - `vc`: continuous conversation mode (VAD) — συνεχής ακρόαση με καταστάσεις `LISTENING -> PROCESSING -> SPEAKING`.
   Κατά το `SPEAKING` η είσοδος παγώνει ώστε να μην ακούει το σύστημα τη δική του εκφώνηση.
+- `nv`: NAO continuous dialog (VAD) — συνεχής λήψη ήχου από NAO (μέσω SSH/arecord) με το ίδιο VAD state machine.
 - `n`: NAO (remote) — ξεκινάει απομακρυσμένη εγγραφή στον ρομπότ μέσω `ssh`, κατεβάζει το WAV με `scp` και το μεταγράφει τοπικά.
 - `q`: έξοδος
 
@@ -206,6 +207,7 @@ python .\App\transcribe_wav.py --file .\Tests\nao_last.wav --no-vocab
 - `STT_LANGUAGE` : γλώσσα μεταγραφής για Whisper (π.χ. `el`). Προεπιλογή `el`.
 - `NAO_USER` : χρήστης για SSH στο NAO (default `nao`).
 - `NAO_IP` / `NAO_PORT` : διεύθυνση/θύρα του NAO — μπορούν να δοθούν και ως CLI args `--nao-ip`/`--nao-port`.
+- `NAO_ARECORD_DEVICE` : προαιρετικό συγκεκριμένο ALSA device για `arecord` στο `nv` mode (π.χ. `hw:0,0`).
 - `NAO_RECORD_SEC` : πόσα δευτερόλεπτα θα εγγράψει ο NAO (default `5`).
 - `NAO_PREP_SEC` : προ-προετοιμασία σεδ (countdown) πριν το remote recording (default `3`).
 - `PUSH_MAX_SECONDS` : μέγιστη διάρκεια για το push-to-talk (mode `v`). Προεπιλογή `15` δευτερόλεπτα. Η εγγραφή θα τερματιστεί αυτόματα μετά από αυτό το όριο.
@@ -228,6 +230,7 @@ python .\App\transcribe_wav.py --file .\Tests\nao_last.wav --no-vocab
 - `v` (φωνή): απαιτεί εγκατάσταση `vosk` και `sounddevice` και διαθέσιμο το μοντέλο στο `VOSK_MODEL_PATH`. Συνιστώ επίσης `soundfile`, `numpy`, `scipy` για fallback μετατροπές.
 - `v` (φωνή): απαιτεί `faster-whisper` + `sounddevice`.
 - `vc` (continuous): απαιτεί `faster-whisper` + `sounddevice` + `numpy/scipy` (για resampling σε native sample rate).
+- `nv` (NAO continuous): απαιτεί SSH πρόσβαση, διαθέσιμο `arecord` στο NAO και σωστό NAO input device.
 - `n` (NAO): απαιτεί SSH πρόσβαση στον NAO, το helper script `/home/nao/nao_record.py` στο ρομπότ και `scp` για μεταφορά αρχείου. Το helper χρησιμοποιεί Python2 στο ρομπότ.
 
 ### Debugging & συμπεριφορά σφαλμάτων
@@ -246,6 +249,13 @@ python .\App\transcribe_wav.py --file .\Tests\nao_last.wav --no-vocab
 - Αν είναι ορισμένο `SOUNDDEVICE_DEVICE`, χρησιμοποιείται αυστηρά η συγκεκριμένη συσκευή (χωρίς silent fallback).
 - Η καταγραφή/ανίχνευση παγώνει στο `SPEAKING` state, άρα αποφεύγονται self-trigger loops από το TTS.
 - Τα events και metrics segment γράφονται στο ίδιο CSV debug log (`STT_DEBUG_LOG_PATH`) με `mode=vc`.
+
+### NAO Continuous VAD mode (`nv`)
+
+- Το `nv` mode κάνει streaming raw PCM από το NAO (`ssh + arecord`) χωρίς push-to-talk.
+- Χρησιμοποιεί την ίδια VAD αρχιτεκτονική και τα ίδια thresholds με το `vc` mode.
+- Κατά το `SPEAKING` η σύλληψη παγώνει (`set_capture_enabled(False)`) και επανέρχεται μετά από `CONT_SPEAKING_TAIL_MS`.
+- Αν αποτύχει το NAO audio source, το mode τερματίζει με explicit error (χωρίς silent fallback).
 
 ### Whisper.cpp (προαιρετικά)
 
@@ -271,3 +281,52 @@ python App\main.py
 
 Σημείωση: μπορείς επίσης να περάσεις `--nao-ip` και `--nao-port` στο `python App/main.py` για προσωρινή παράκαμψη.
 Για το v ωστε να βρισκει το μικροφωνο : python -c "import sounddevice as sd; print(sd.query_devices())"
+
+python .\App\main.py --nao-ip 192.168.6.106
+
+## Quick Routine After Closing PowerShell / Reconnecting NAO
+
+Ναι, μπορεί να δουλεύει κανονικά και μετά από κλείσιμο PowerShell ή reconnect με το NAO, αρκεί να ακολουθείς αυτά τα βήματα.
+
+### 1) Νέα συνεδρία PowerShell
+
+```powershell
+cd C:\Users\frag2\Documents\Diplomatiki_NAO\controllers\nao_ai_integration
+& .\.venv\Scripts\Activate.ps1
+```
+
+### 2) (Προτεινόμενο) Όρισε SSH env vars για τη συνεδρία
+
+```powershell
+$env:NAO_SSH_HOST='nao'
+$env:NAO_SSH_KEY=$HOME + '\.ssh\nao_ed25519'
+```
+
+Σημείωση: αν τα βάλεις στο `.env`, θα φορτώνονται αυτόματα από το app.
+
+### 3) Γρήγορος έλεγχος σύνδεσης με NAO
+
+```powershell
+ssh nao "echo NO_PASSWORD_OK"
+```
+
+Αν εμφανιστεί `NO_PASSWORD_OK` χωρίς password prompt, το key-based login είναι σωστό.
+
+### 4) Εκκίνηση εφαρμογής
+
+```powershell
+python .\App\main.py --nao-ip 192.168.6.106
+```
+
+### 5) Αν έχεις κάνει disconnect/reconnect με NAO
+
+1. Βεβαιώσου ότι το NAO έχει ξανά δικτυακή σύνδεση (ίδιο ή νέο IP).
+2. Αν άλλαξε IP, τρέξε `python .\App\main.py --nao-ip <NEW_IP>` ή ενημέρωσε `NAO_IP` στο `.env`.
+3. Ξανακάνε το SSH check: `ssh nao "echo NO_PASSWORD_OK"`.
+4. Μπες σε `nv` mode και περίμενε `noise_calibrated` πριν μιλήσεις.
+
+### 6) Γρήγορο troubleshooting
+
+- Αν το `nv` δεν ακούει: έλεγξε `NAO_ARECORD_DEVICE`.
+- Αν ζητάει κωδικό: έλεγξε `NAO_SSH_HOST`, `NAO_SSH_KEY`, και ότι το `ssh nao` μπαίνει χωρίς password.
+- Αν υπάρχει αστάθεια στο stream: ξαναδοκίμασε `nv` (υπάρχει auto-reconnect loop).

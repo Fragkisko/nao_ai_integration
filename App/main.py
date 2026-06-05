@@ -14,7 +14,7 @@ from nao_common import (
     nao_say,
     tts_clip,
 )
-from nao_service import run_nao_record_and_transcribe
+from nao_service import NAOContinuousAudioSource, run_nao_record_and_transcribe
 from rag_service import answer_query, init_rag_engine
 from speech_to_text import (
     ContinuousVADCapture,
@@ -64,7 +64,7 @@ def _append_stt_debug_row(settings, *, mode: str, stt_text: str, rag_answer: str
         print(f"[WARN] STT debug log write failed: {e}")
 
 
-def _append_vad_metrics_row(settings, *, state: str, event: str, metrics: dict) -> None:
+def _append_vad_metrics_row(settings, *, mode: str, state: str, event: str, metrics: dict) -> None:
     if not settings.stt_debug_log_enabled:
         return
 
@@ -96,7 +96,7 @@ def _append_vad_metrics_row(settings, *, state: str, event: str, metrics: dict) 
             writer.writerow(
                 {
                     "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "mode": "vc",
+                    "mode": mode,
                     "stt_text": "",
                     "rag_answer": "",
                     "rag_error": "",
@@ -114,19 +114,8 @@ def _append_vad_metrics_row(settings, *, state: str, event: str, metrics: dict) 
         print(f"[WARN] VAD metrics log write failed: {e}")
 
 
-def _run_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model) -> None:
-    if whisper_model is None:
-        print("[WARN] Continuous mode χρειάζεται Whisper STT αλλά δεν είναι διαθέσιμο.")
-        return
-
-    try:
-        device_index = resolve_input_device_from_env(strict=True)
-    except Exception as e:
-        print(f"[WARN] Invalid input device configuration: {e}")
-        print("[WARN] Ρύθμισε σωστά το SOUNDDEVICE_DEVICE για να αποφευχθεί fallback σε λάθος μικρόφωνο.")
-        return
-
-    vad_config = ContinuousVADConfig(
+def _build_continuous_vad_config(settings) -> ContinuousVADConfig:
+    return ContinuousVADConfig(
         frame_ms=settings.continuous_vad_frame_ms,
         preroll_ms=settings.continuous_vad_preroll_ms,
         min_speech_ms=settings.continuous_vad_min_speech_ms,
@@ -139,77 +128,172 @@ def _run_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model) 
         target_samplerate=16000,
     )
 
+
+def _run_vad_dialog_loop(mode: str, settings, rag_module, rag_engine, whisper_model, vad_capture) -> None:
     state = "LISTENING"
-    print("Continuous conversation mode ενεργό.")
+    print(f"{mode.upper()} continuous conversation mode ενεργό.")
     print("Καταστάσεις: LISTENING -> PROCESSING -> SPEAKING")
     print("Πάτα Ctrl+C για έξοδο από continuous mode.")
 
+    while True:
+        state = "LISTENING"
+        segment = vad_capture.next_segment()
+        metrics = segment.get("metrics", {}) if isinstance(segment, dict) else {}
+        _append_vad_metrics_row(settings, mode=mode, state=state, event="speech_started", metrics=metrics)
+        _append_vad_metrics_row(settings, mode=mode, state=state, event="speech_stopped", metrics=metrics)
+
+        if segment.get("discarded"):
+            _append_vad_metrics_row(settings, mode=mode, state=state, event="segment_discarded", metrics=metrics)
+            continue
+
+        _append_vad_metrics_row(settings, mode=mode, state=state, event="segment_ready", metrics=metrics)
+
+        state = "PROCESSING"
+        user_text = transcribe_pcm16_with_whisper(
+            whisper_model,
+            segment.get("audio_pcm16", b""),
+            samplerate=int(segment.get("samplerate", 16000)),
+            language=settings.stt_language,
+        )
+
+        if not user_text:
+            print("[WARN] Whisper επέστρεψε κενό αποτέλεσμα.")
+            _append_vad_metrics_row(settings, mode=mode, state=state, event="whisper_empty", metrics=metrics)
+            continue
+
+        print("Καταγραφή:", user_text)
+        rag_result = answer_query(rag_engine, user_text)
+
+        if settings.rag_debug_chunks and rag_module is not None:
+            for i, item in enumerate(rag_result.get("chunks", []), start=1):
+                print(rag_module.format_chunk(item, i))
+
+        reply = (rag_result.get("answer") or "").strip()
+        rag_error = rag_result.get("error") or ""
+        if rag_error:
+            _append_vad_metrics_row(settings, mode=mode, state=state, event="rag_error", metrics=metrics)
+
+        if not reply:
+            if rag_error:
+                print(f"[WARN] {rag_error}")
+            reply = settings.rag_fallback_reply
+
+        _append_stt_debug_row(
+            settings,
+            mode=mode,
+            stt_text=user_text,
+            rag_answer=reply,
+            rag_error=rag_error,
+        )
+
+        print("NAO:", reply)
+
+        state = "SPEAKING"
+        _append_vad_metrics_row(settings, mode=mode, state=state, event="speaking_started", metrics=metrics)
+        vad_capture.set_capture_enabled(False)
+        try:
+            nao_say(tts_clip(reply))
+        except subprocess.TimeoutExpired:
+            print("[WARN] NAO timeout")
+        except Exception as e:
+            print(f"[WARN] NAO error: {e}")
+        finally:
+            tail_sec = max(0.0, settings.continuous_speaking_tail_ms / 1000.0)
+            if tail_sec > 0:
+                time.sleep(tail_sec)
+            vad_capture.set_capture_enabled(True)
+            _append_vad_metrics_row(settings, mode=mode, state=state, event="speaking_finished", metrics=metrics)
+
+
+def _run_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model) -> None:
+    if whisper_model is None:
+        print("[WARN] Continuous mode χρειάζεται Whisper STT αλλά δεν είναι διαθέσιμο.")
+        return
+
+    try:
+        device_index = resolve_input_device_from_env(strict=True)
+    except Exception as e:
+        print(f"[WARN] Invalid input device configuration: {e}")
+        print("[WARN] Ρύθμισε σωστά το SOUNDDEVICE_DEVICE για να αποφευχθεί fallback σε λάθος μικρόφωνο.")
+        return
+
+    vad_config = _build_continuous_vad_config(settings)
+
     try:
         with ContinuousVADCapture(vad_config, device_index=device_index) as vad_capture:
-            while True:
-                state = "LISTENING"
-                segment = vad_capture.next_segment()
-                metrics = segment.get("metrics", {}) if isinstance(segment, dict) else {}
-                _append_vad_metrics_row(settings, state=state, event="segment_detected", metrics=metrics)
-
-                if segment.get("discarded"):
-                    _append_vad_metrics_row(settings, state=state, event="segment_discarded", metrics=metrics)
-                    continue
-
-                state = "PROCESSING"
-                user_text = transcribe_pcm16_with_whisper(
-                    whisper_model,
-                    segment.get("audio_pcm16", b""),
-                    samplerate=int(segment.get("samplerate", 16000)),
-                    language=settings.stt_language,
-                )
-
-                if not user_text:
-                    print("[WARN] Whisper επέστρεψε κενό αποτέλεσμα.")
-                    _append_vad_metrics_row(settings, state=state, event="whisper_empty", metrics=metrics)
-                    continue
-
-                print("Καταγραφή:", user_text)
-                rag_result = answer_query(rag_engine, user_text)
-
-                if settings.rag_debug_chunks and rag_module is not None:
-                    for i, item in enumerate(rag_result.get("chunks", []), start=1):
-                        print(rag_module.format_chunk(item, i))
-
-                reply = (rag_result.get("answer") or "").strip()
-                rag_error = rag_result.get("error") or ""
-                if not reply:
-                    if rag_error:
-                        print(f"[WARN] {rag_error}")
-                    reply = settings.rag_fallback_reply
-
-                _append_stt_debug_row(
-                    settings,
-                    mode="vc",
-                    stt_text=user_text,
-                    rag_answer=reply,
-                    rag_error=rag_error,
-                )
-
-                print("NAO:", reply)
-
-                state = "SPEAKING"
-                vad_capture.set_capture_enabled(False)
-                try:
-                    nao_say(tts_clip(reply))
-                except subprocess.TimeoutExpired:
-                    print("[WARN] NAO timeout")
-                except Exception as e:
-                    print(f"[WARN] NAO error: {e}")
-                finally:
-                    tail_sec = max(0.0, settings.continuous_speaking_tail_ms / 1000.0)
-                    if tail_sec > 0:
-                        time.sleep(tail_sec)
-                    vad_capture.set_capture_enabled(True)
+            _run_vad_dialog_loop("vc", settings, rag_module, rag_engine, whisper_model, vad_capture)
     except KeyboardInterrupt:
         print("\n[INFO] Continuous mode stopped by user.")
     except Exception as e:
         print(f"[WARN] Continuous mode failed: {e}")
+
+
+def _run_nao_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model) -> None:
+    if whisper_model is None:
+        print("[WARN] NAO continuous mode χρειάζεται Whisper STT αλλά δεν είναι διαθέσιμο.")
+        return
+
+    vad_config = _build_continuous_vad_config(settings)
+    nao_user = "nao"
+    nao_ip_runtime = NAO_IP
+    nao_arecord_device = ""
+    try:
+        # Read runtime overrides directly from env to keep compatibility with existing n mode behavior.
+        import os
+
+        nao_user = os.environ.get("NAO_USER", "nao")
+        nao_ip_runtime = os.environ.get("NAO_IP", NAO_IP)
+        nao_arecord_device = os.environ.get("NAO_ARECORD_DEVICE", "").strip()
+    except Exception:
+        pass
+
+    reconnect_attempt = 0
+    max_reconnect_attempts = 6
+
+    while True:
+        try:
+            with NAOContinuousAudioSource(
+                nao_ip=nao_ip_runtime,
+                nao_user=nao_user,
+                samplerate=vad_config.target_samplerate,
+                frame_ms=vad_config.frame_ms,
+                arecord_device=nao_arecord_device,
+            ) as nao_source:
+                reconnect_attempt = 0
+                with ContinuousVADCapture(
+                    vad_config,
+                    frame_reader=nao_source.read_frame,
+                    source_native_samplerate=nao_source.samplerate,
+                    clear_external_buffer=nao_source.clear_buffer,
+                ) as vad_capture:
+                    _run_vad_dialog_loop("nv", settings, rag_module, rag_engine, whisper_model, vad_capture)
+            return
+        except KeyboardInterrupt:
+            print("\n[INFO] NAO continuous mode stopped by user.")
+            return
+        except Exception as e:
+            msg = str(e)
+            transient_stream_error = (
+                "stopped unexpectedly" in msg
+                or "exit=255" in msg
+                or "audio frame read failed" in msg
+            )
+            if not transient_stream_error:
+                print(f"[WARN] NAO continuous mode failed: {e}")
+                return
+
+            reconnect_attempt += 1
+            if reconnect_attempt > max_reconnect_attempts:
+                print(f"[WARN] NAO continuous mode failed after reconnect attempts: {e}")
+                return
+
+            backoff_sec = min(5.0, float(reconnect_attempt))
+            print(
+                "[WARN] NAO stream disconnected "
+                f"(attempt {reconnect_attempt}/{max_reconnect_attempts}): {e}"
+            )
+            print(f"[INFO] Reconnecting NAO stream in {backoff_sec:.1f}s...")
+            time.sleep(backoff_sec)
 
 
 def main():
@@ -250,7 +334,8 @@ def main():
     print(
         "Επιλογές εισόδου: "
         "(k) πληκτρολόγιο / (v) φωνή / (vs) φωνή μόνο STT (debug) / "
-        "(vc) συνεχής φωνητικός διάλογος (VAD) / (n) NAO (test) / (q) έξοδος"
+        "(vc) συνεχής φωνητικός διάλογος (VAD) / "
+        "(nv) NAO continuous dialog (VAD) / (n) NAO (test) / (q) έξοδος"
     )
 
     while True:
@@ -289,6 +374,9 @@ def main():
         elif mode == "vc":
             _run_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model)
             continue
+        elif mode == "nv":
+            _run_nao_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model)
+            continue
         elif mode == "n":
             if not whisper_available or whisper_model is None:
                 print("[WARN] NAO mode χρειάζεται Whisper STT αλλά δεν είναι διαθέσιμο.")
@@ -297,7 +385,7 @@ def main():
             if not user_text:
                 continue
         else:
-            print("Άγνωστη επιλογή — πάτα k, v, vs, vc, n ή q")
+            print("Άγνωστη επιλογή — πάτα k, v, vs, vc, nv, n ή q")
             continue
 
         rag_result = answer_query(rag_engine, user_text)

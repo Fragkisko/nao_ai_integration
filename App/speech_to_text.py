@@ -150,16 +150,22 @@ class ContinuousVADCapture:
         config: Optional[ContinuousVADConfig] = None,
         *,
         device_index: Optional[int] = None,
+        frame_reader: Optional[Callable[[float], bytes]] = None,
+        source_native_samplerate: Optional[int] = None,
+        clear_external_buffer: Optional[Callable[[], None]] = None,
         logger: Optional[Callable[[str], None]] = None,
     ):
-        if not SOUNDDEVICE_AVAILABLE or sd is None:
-            raise RuntimeError("sounddevice unavailable")
         if not PY_AUDIO_FALLBACK_AVAILABLE or np is None or resample_poly is None:
             raise RuntimeError("numpy/scipy are required for continuous VAD mode")
+        if frame_reader is None and (not SOUNDDEVICE_AVAILABLE or sd is None):
+            raise RuntimeError("sounddevice unavailable")
 
         self.config = config or ContinuousVADConfig()
         self.logger = logger or print
         self.device_index = device_index
+        self.frame_reader = frame_reader
+        self.source_native_samplerate = source_native_samplerate
+        self.clear_external_buffer = clear_external_buffer
 
         self.native_samplerate = self.config.target_samplerate
         self.blocksize = max(1, int(self.native_samplerate * self.config.frame_ms / 1000))
@@ -183,6 +189,12 @@ class ContinuousVADCapture:
                 break
 
     def set_capture_enabled(self, enabled: bool) -> None:
+        if self.frame_reader is not None and self.clear_external_buffer is not None:
+            try:
+                self.clear_external_buffer()
+            except Exception as e:
+                self._log("external_buffer_clear_failed", error=str(e))
+
         if enabled:
             self._capture_enabled.set()
             self._clear_audio_queue()
@@ -206,6 +218,21 @@ class ContinuousVADCapture:
             self._log("queue_overflow", maxsize=self._audio_queue.maxsize)
 
     def __enter__(self):
+        if self.frame_reader is not None:
+            native_sr = int(self.source_native_samplerate or self.config.target_samplerate)
+            if native_sr <= 0:
+                raise RuntimeError(f"Invalid source native samplerate: {native_sr}")
+            self.native_samplerate = native_sr
+            self.blocksize = max(1, int(self.native_samplerate * self.config.frame_ms / 1000))
+            self._log(
+                "source_opened",
+                source="external",
+                native_sr=self.native_samplerate,
+                blocksize=self.blocksize,
+                target_sr=self.config.target_samplerate,
+            )
+            return self
+
         if self.device_index is None:
             dev_info = sd.query_devices(kind="input")
             device_for_stream = None
@@ -258,6 +285,11 @@ class ContinuousVADCapture:
                 self._stream = None
                 self._log("stream_closed")
 
+    def _read_next_frame(self, timeout_sec: float) -> bytes:
+        if self.frame_reader is not None:
+            return self.frame_reader(timeout_sec)
+        return self._audio_queue.get(timeout=timeout_sec)
+
     @staticmethod
     def _rms_dbfs_from_pcm16(frame_bytes: bytes) -> float:
         arr = np.frombuffer(frame_bytes, dtype=np.int16).astype(np.float32)
@@ -298,6 +330,7 @@ class ContinuousVADCapture:
         speech_frame_count = 0
         silence_frame_count = 0
         total_frame_count = 0
+        in_speech_total_frames = 0
         in_speech = False
         segment_start_ts = 0.0
         end_reason = "unknown"
@@ -305,7 +338,13 @@ class ContinuousVADCapture:
         self._log("listening", noise_floor_db=round(noise_floor_db, 2))
 
         while True:
-            frame = self._audio_queue.get(timeout=1.0)
+            try:
+                frame = self._read_next_frame(timeout_sec=1.0)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                self._log("source_read_failed", error=str(e), in_speech=in_speech)
+                raise RuntimeError(f"audio frame read failed: {e}")
             dbfs = self._rms_dbfs_from_pcm16(frame)
             total_frame_count += 1
 
@@ -316,6 +355,13 @@ class ContinuousVADCapture:
                     idx = max(0, int(0.8 * len(calibration_sorted)) - 1)
                     noise_floor_db = calibration_sorted[idx]
                     self._log("noise_calibrated", noise_floor_db=round(noise_floor_db, 2))
+                    # Drop calibration preroll so the first segment starts with fresh context.
+                    preroll.clear()
+
+            calibrated = len(calibration_buf) >= calibration_frames
+            if not calibrated:
+                preroll.append(frame)
+                continue
 
             start_threshold = noise_floor_db + float(self.config.start_threshold_db)
             stop_threshold = noise_floor_db + float(self.config.stop_threshold_db)
@@ -334,6 +380,7 @@ class ContinuousVADCapture:
                     segment_start_ts = time.time()
                     segment_frames.extend(list(preroll))
                     speech_frame_count = len(preroll)
+                    in_speech_total_frames = len(preroll)
                     silence_frame_count = 0
                     self._log(
                         "speech_started",
@@ -343,6 +390,7 @@ class ContinuousVADCapture:
                 continue
 
             segment_frames.append(frame)
+            in_speech_total_frames += 1
             if dbfs >= stop_threshold:
                 speech_frame_count += 1
                 silence_frame_count = 0
@@ -353,7 +401,7 @@ class ContinuousVADCapture:
                 end_reason = "silence"
                 break
 
-            if total_frame_count >= max_total_frames:
+            if in_speech_total_frames >= max_total_frames:
                 end_reason = "max_duration"
                 break
 
