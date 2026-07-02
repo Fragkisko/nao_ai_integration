@@ -11,6 +11,7 @@ import argparse
 import importlib.util
 import json
 import requests
+import sys
 from time import time
 import logging
 import os
@@ -53,6 +54,9 @@ def _load_dotenv_from_parents(start_dir: Path) -> None:
 def load_retrieval_module(rag_root: Path):
     # retrieval is in Rag-Chabot/Retrival/retrieval.py
     retrieval_path = rag_root / "Retrival" / "retrieval.py"
+    retrieval_dir = str(retrieval_path.parent.resolve())
+    if retrieval_dir not in sys.path:
+        sys.path.insert(0, retrieval_dir)
     spec = importlib.util.spec_from_file_location("retrieval", str(retrieval_path))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -197,6 +201,7 @@ class RAGEngine:
         self.meta = None
         self.faiss_idx = None
         self.embeddings = None
+        self.bm25_idx = None
         self.model = None
 
         if self.preload_retrieval_on_boot:
@@ -236,6 +241,13 @@ class RAGEngine:
             self.faiss_idx = self.retrieval.load_faiss_index(out_dir / self.retrieval.FAISS_INDEX_FILENAME)
         else:
             self.embeddings = self.retrieval.load_embeddings_np(out_dir / self.retrieval.EMBEDDINGS_FILENAME)
+
+        # Build/load sparse index from the same metadata corpus used for dense retrieval.
+        try:
+            self.bm25_idx = self.retrieval.load_or_build_bm25(out_dir, self.meta)
+        except Exception as e:
+            print(f"[WARN] BM25 index unavailable, continuing dense-only retrieval: {e}")
+            self.bm25_idx = None
 
         print("Loading embedding model (only once)...")
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -295,7 +307,18 @@ class RAGEngine:
 
         self._ensure_retrieval_loaded()
         _t0 = time()
-        res = self.retrieval.retrieve(q, self.model, self.faiss_idx, self.embeddings, self.meta, top_k=self.k)
+        res = self.retrieval.retrieve(
+            q,
+            self.model,
+            self.faiss_idx,
+            self.embeddings,
+            self.meta,
+            bm25_index=self.bm25_idx,
+            top_k=self.k,
+            dense_top_n=20,
+            sparse_top_n=20,
+            rrf_k=60,
+        )
         _ = time() - _t0
 
         context = res.get("context", "")

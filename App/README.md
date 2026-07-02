@@ -330,3 +330,7 @@ python .\App\main.py --nao-ip 192.168.6.106
 - Αν το `nv` δεν ακούει: έλεγξε `NAO_ARECORD_DEVICE`.
 - Αν ζητάει κωδικό: έλεγξε `NAO_SSH_HOST`, `NAO_SSH_KEY`, και ότι το `ssh nao` μπαίνει χωρίς password.
 - Αν υπάρχει αστάθεια στο stream: ξαναδοκίμασε `nv` (υπάρχει auto-reconnect loop).
+
+python .\Chunking\chunker.py .\Documents -o .\Documents\extracted_text -f
+python .\Chunking\chunker.py .\Documents\extracted_text --chunk-texts -o .\Documents\extracted_text\extracted_chunks -f
+python .\Embedding\embeddings.py --preview .\Documents\extracted_text\extracted_chunks\chunk_preview.json --output .\Embedding\out --use-faiss

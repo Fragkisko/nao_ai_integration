@@ -18,6 +18,9 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 from difflib import SequenceMatcher
 
+from bm25_index import BM25Index, load_or_build_bm25_index
+from hybrid_fusion import reciprocal_rank_fusion
+
 try:
     import faiss
     _HAS_FAISS = True
@@ -40,6 +43,11 @@ MAX_CONTEXT_CHARS = 1000
 EMBEDDINGS_FILENAME = "embeddings.npy"
 METADATA_FILENAME = "metadata.json"
 FAISS_INDEX_FILENAME = "faiss.index"
+BM25_INDEX_FILENAME = "bm25_index.json"
+
+HYBRID_DENSE_TOP_N = 20
+HYBRID_SPARSE_TOP_N = 20
+RRF_K = 60
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -114,7 +122,7 @@ def _trim_context(text: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
 # Search / Retrieval
 # ----------------------
 def search(query: str,
-           model: SentenceTransformer,
+           model: Any,
            faiss_index: Optional[Any],
            embeddings: Optional[np.ndarray],
            metadata: List[Dict[str, Any]],
@@ -162,7 +170,7 @@ def format_results(results: List[Dict[str, Any]]) -> str:
 # ----------------------
 # Extended pipeline functions
 # ----------------------
-def embed_query(model: SentenceTransformer, query: str) -> np.ndarray:
+def embed_query(model: Any, query: str) -> np.ndarray:
     """Return normalized embedding vector for the query."""
     q_text = build_query_for_embedding(query)
     emb = model.encode([q_text], normalize_embeddings=True, convert_to_numpy=True)[0]
@@ -260,24 +268,54 @@ def build_prompt_context(chunks: List[Dict[str, Any]], max_chars: int = MAX_CONT
     return merge_chunks(chunks, max_chars)
 
 
+def load_or_build_bm25(out_dir: Path,
+                       metadata: List[Dict[str, Any]],
+                       filename: str = BM25_INDEX_FILENAME) -> BM25Index:
+    idx_path = out_dir / filename
+    logger.info("Loading or building BM25 index at %s", idx_path)
+    return load_or_build_bm25_index(idx_path, metadata)
+
+
 def retrieve(query: str,
-             model: SentenceTransformer,
+             model: Any,
              faiss_index: Optional[Any],
              embeddings: Optional[np.ndarray],
              metadata: List[Dict[str, Any]],
+             bm25_index: Optional[BM25Index] = None,
              top_k: int = TOP_K,
+             dense_top_n: int = HYBRID_DENSE_TOP_N,
+             sparse_top_n: int = HYBRID_SPARSE_TOP_N,
+             rrf_k: int = RRF_K,
              min_score: float = SCORE_THRESHOLD,
              duplicate_thresh: float = 0.85) -> Dict[str, Any]:
     """Run full retrieval pipeline and return final context + raw results."""
     q_norm = normalize_query(query)
     q_emb = embed_query(model, q_norm)
-    indices, scores = search_index(q_emb, faiss_index, embeddings, top_k=top_k*4)
-    raw = build_results(metadata, indices, scores)
-    filtered = filter_results(raw, min_score=min_score, duplicate_thresh=duplicate_thresh)
+
+    dense_pool = max(top_k * 4, dense_top_n)
+    indices, scores = search_index(q_emb, faiss_index, embeddings, top_k=dense_pool)
+    dense_raw = build_results(metadata, indices, scores)
+
+    retrieval_mode = "dense"
+    raw = dense_raw
+    effective_min_score = min_score
+
+    if bm25_index is not None:
+        sparse_raw = bm25_index.search(q_norm, top_n=sparse_top_n, metadata=metadata)
+        fused = reciprocal_rank_fusion(
+            [dense_raw[:dense_top_n], sparse_raw],
+            rrf_k=rrf_k,
+        )
+        raw = fused
+        retrieval_mode = "hybrid_rrf"
+        # RRF scores are rank-based and on a small range, so thresholding is disabled.
+        effective_min_score = 0.0
+
+    filtered = filter_results(raw, min_score=effective_min_score, duplicate_thresh=duplicate_thresh)
     # optional rerank step could be added here
     final = filtered[:top_k]
     context = build_prompt_context(final)
-    return {"query": query, "results": final, "context": context}
+    return {"query": query, "results": final, "context": context, "mode": retrieval_mode}
 
 
 if __name__ == "__main__":
