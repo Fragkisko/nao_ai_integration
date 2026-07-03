@@ -79,7 +79,7 @@ class AppSettings:
 def build_settings() -> AppSettings:
     return AppSettings(
         rag_model=os.environ.get("RAG_MODEL", "gpt-4o-mini"),
-        rag_top_k=_env_int("RAG_TOP_K", 20),
+        rag_top_k=_env_int("RAG_TOP_K", 30),
         rag_preload_retrieval_on_boot=_env_bool("RAG_PRELOAD_RETRIEVAL_ON_BOOT", True),
         rag_debug_chunks=_env_bool("RAG_DEBUG_CHUNKS", False),
         rag_fallback_reply="Δεν βρήκα αξιόπιστη απάντηση τώρα",

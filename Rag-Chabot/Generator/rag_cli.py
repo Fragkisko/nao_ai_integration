@@ -21,6 +21,14 @@ import io
 from typing import Any, Dict, List, Optional
 
 
+NO_EVIDENCE_ANSWER = "Δεν βρέθηκε σχετική πληροφορία."
+STRICT_RAG_SYSTEM_PROMPT = (
+    "Απάντησε ΜΟΝΟ χρησιμοποιώντας τα αποσπάσματα που δίνονται. "
+    "Αν η απάντηση δεν υπάρχει στα αποσπάσματα, απάντησε ακριβώς: \"Δεν βρέθηκε σχετική πληροφορία.\" "
+    "ΜΗΝ χρησιμοποιείς εξωτερική γνώση."
+)
+
+
 def _load_dotenv_from_parents(start_dir: Path) -> None:
     """Best-effort .env loader without external dependency.
 
@@ -71,12 +79,18 @@ def load_structured_retrieval_module(rag_root: Path):
     return mod
 
 
-def openai_chat(api_base_url: str, api_key: str, model: str, prompt: str, temperature: float = 0.0):
+def openai_chat(api_base_url: str,
+                api_key: str,
+                model: str,
+                prompt: str,
+                temperature: float = 0.0,
+                system_prompt: Optional[str] = None):
     url = api_base_url.rstrip("/") + "/chat/completions"
+    sys_prompt = system_prompt or "You are a helpful assistant. Use the provided context to answer precisely."
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are a helpful assistant. Use the provided context to answer precisely."},
+            {"role": "system", "content": sys_prompt},
             {"role": "user", "content": prompt},
         ],
         "temperature": temperature,
@@ -111,13 +125,13 @@ def openai_chat(api_base_url: str, api_key: str, model: str, prompt: str, temper
 
 
 def build_prompt_from_context(context: str, query: str) -> str:
-    prompt = (
-        "Παρακάτω είναι τα σχετικά αποσπάσματα από τα έγγραφα. Χρησιμοποίησέ τα για να απαντήσεις στην ερώτηση.\n\n"
-        f"Context:\n{context}\n\n"
-        f"Ερώτηση: {query}\n\n"
-        "Απάντησε σύντομα με υφος ξεναγου και μην προσθέτεις τίποτα που δεν μπορείς να τεκμηριώσεις από τα αποσπάσματα. Αν δεν ξέρεις, πες το ευθέως."
+    return (
+        "### CONTEXT\n"
+        f"{context}\n\n"
+        "### QUESTION\n"
+        f"{query}\n\n"
+        "### ANSWER\n"
     )
-    return prompt
 
 
 def build_prompt_from_structured_facts(query: str, structured_answer: dict) -> str:
@@ -236,11 +250,12 @@ class RAGEngine:
 
         self.meta = self.retrieval.load_metadata(out_dir / self.retrieval.METADATA_FILENAME)
         self.faiss_idx = None
-        self.embeddings = None
+        self.embeddings = self.retrieval.load_embeddings_np(out_dir / self.retrieval.EMBEDDINGS_FILENAME)
         if getattr(self.retrieval, "_HAS_FAISS", False) and (out_dir / self.retrieval.FAISS_INDEX_FILENAME).exists():
             self.faiss_idx = self.retrieval.load_faiss_index(out_dir / self.retrieval.FAISS_INDEX_FILENAME)
-        else:
-            self.embeddings = self.retrieval.load_embeddings_np(out_dir / self.retrieval.EMBEDDINGS_FILENAME)
+
+        if self.faiss_idx is None and self.embeddings is None:
+            raise RuntimeError("No retrieval index available: both FAISS and embeddings are missing")
 
         # Build/load sparse index from the same metadata corpus used for dense retrieval.
         try:
@@ -318,10 +333,22 @@ class RAGEngine:
             dense_top_n=20,
             sparse_top_n=20,
             rrf_k=60,
+            min_chunks_for_context=15,
+            max_chunks_for_context=20,
+            context_max_chars=12000,
         )
         _ = time() - _t0
 
         context = res.get("context", "")
+        if not res.get("results"):
+            return {
+                "answer": NO_EVIDENCE_ANSWER,
+                "chunks": [],
+                "error": None,
+                "route": "retrieval",
+                "query_analysis": res.get("query_analysis", {}),
+            }
+
         prompt = build_prompt_from_context(context, q)
         try:
             api_key = os.environ.get(self.api_key_env, "").strip()
@@ -332,7 +359,16 @@ class RAGEngine:
                     "error": f"Missing API key in env var: {self.api_key_env}",
                     "route": "retrieval",
                 }
-            answer = openai_chat(self.api_base_url, api_key, self.model_name, prompt).strip()
+            answer = openai_chat(
+                self.api_base_url,
+                api_key,
+                self.model_name,
+                prompt,
+                temperature=0.0,
+                system_prompt=STRICT_RAG_SYSTEM_PROMPT,
+            ).strip()
+            if not answer:
+                answer = NO_EVIDENCE_ANSWER
         except Exception as e:
             return {
                 "answer": None,
@@ -346,6 +382,15 @@ class RAGEngine:
             "chunks": res.get("results", []),
             "error": None,
             "route": "retrieval",
+            "query_analysis": res.get("query_analysis", {}),
+            "retrieval_debug": {
+                "requested_top_k": res.get("requested_top_k"),
+                "final_result_count": res.get("final_result_count"),
+                "context_chunk_count": res.get("context_chunk_count"),
+                "context_truncated": res.get("context_truncated"),
+                "context_char_len": res.get("context_char_len"),
+                "filtered_corpus_size": res.get("filtered_corpus_size"),
+            },
         }
 
 
@@ -421,6 +466,18 @@ def main():
 
         print()
         print(f'Απάντηση: "{clean_answer}"')
+
+        if not args.quiet:
+            debug = result.get("retrieval_debug") or {}
+            if debug:
+                print(
+                    "Retrieval debug: "
+                    f"requested_top_k={debug.get('requested_top_k')} "
+                    f"selected_chunks={debug.get('final_result_count')} "
+                    f"sent_to_llm={debug.get('context_chunk_count')} "
+                    f"context_chars={debug.get('context_char_len')} "
+                    f"truncated={debug.get('context_truncated')}"
+                )
 
         # Optionally print the individual retrieved chunks
         if args.show_chunks:

@@ -13,7 +13,7 @@ import json
 import logging
 import unicodedata
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import numpy as np
 from difflib import SequenceMatcher
@@ -38,7 +38,7 @@ except Exception:
 EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-base"
 TOP_K = 5
 SCORE_THRESHOLD = 0.2
-MAX_CONTEXT_CHARS = 1000
+MAX_CONTEXT_CHARS = 12000
 
 EMBEDDINGS_FILENAME = "embeddings.npy"
 METADATA_FILENAME = "metadata.json"
@@ -48,6 +48,91 @@ BM25_INDEX_FILENAME = "bm25_index.json"
 HYBRID_DENSE_TOP_N = 20
 HYBRID_SPARSE_TOP_N = 20
 RRF_K = 60
+PROGRAM_MATCH_BONUS = 5.0
+
+CATEGORY_KEYWORD_BONUS = 10.0
+NO_EVIDENCE_ANSWER = "Δεν βρέθηκε σχετική πληροφορία."
+
+PROGRAM_CANONICAL = {
+    "intelligent_internet_technologies": "Ευφυείς Τεχνολογίες Διαδικτύου",
+    "new_tech_innovation_didactics": "Νέες Τεχνολογίες, Καινοτομία και Διδακτική",
+    "digital_soft_skills": "Ψηφιακές και Ήπιες Δεξιότητες",
+}
+
+PROGRAM_DETECTION_RULES = {
+    PROGRAM_CANONICAL["intelligent_internet_technologies"]: ["ευφυ", "διαδικτυ"],
+    PROGRAM_CANONICAL["new_tech_innovation_didactics"]: ["καινοτομι", "διδακτικ"],
+    PROGRAM_CANONICAL["digital_soft_skills"]: ["ψηφιακ", "ηπιες δεξιοτητες", "ήπιες δεξιότητες"],
+}
+
+PROGRAM_SOURCE_PATTERNS = {
+    PROGRAM_CANONICAL["intelligent_internet_technologies"]: [
+        "Οδηγός-Σπουδών-Μεταπτυχιακο-Ευφυείς-Τεχνολογίες-Διαδικτύου",
+    ],
+    PROGRAM_CANONICAL["new_tech_innovation_didactics"]: [
+        "Οδηγός-Σπουδών-Μεταπτυχιακο-Νέες τεχνολογίες-καινοτομία-και-διδακτική",
+    ],
+    PROGRAM_CANONICAL["digital_soft_skills"]: [
+        "Οδηγός-Σπουδών-Μεταπτυχιακο-Ψηφιακές-και-ήπιες-δεξιότητες-στις-επιστήμες-της-αγωγής",
+    ],
+}
+
+CATEGORY_KEYWORDS = {
+    "fees": ["διδακτρα", "δίδακτρα", "κοστος", "κόστος", "τελη", "τέλη", "ευρω", "ευρώ"],
+    "duration": ["διαρκεια", "διάρκεια", "εξαμηνα", "εξάμηνα", "χρονια", "χρόνια", "ετη", "έτη"],
+    "admissions": ["εισακτεοι", "εισακτέοι", "θεσεις", "θέσεις", "αιτησεις", "αιτήσεις"],
+    "curriculum": ["μαθηματα", "μαθήματα", "ects"],
+}
+
+CATEGORY_BONUS_TERMS = {
+    "fees": ["δίδακτρα", "διδακτρα", "τέλη φοίτησης", "τελη φοιτησης", "ευρώ", "ευρω", "500"],
+    "duration": ["εξάμηνα", "εξαμηνα", "διάρκεια", "διαρκεια", "έτη", "ετη"],
+    "admissions": ["εισακτέοι", "εισακτεοι", "θέσεις", "θεσεις", "φοιτητές", "φοιτητες"],
+    "curriculum": ["ects", "μαθήματα", "μαθηματα"],
+}
+
+POSTGRAD_QUERY_HINTS = (
+    "μεταπτυχ",
+    "πμσ",
+    "pms",
+    "master",
+    "msc",
+)
+
+POSTGRAD_PROGRAM_SOURCES = {
+    "digital_soft_skills": [
+        "Οδηγός-Σπουδών-Μεταπτυχιακο-Ψηφιακές-και-ήπιες-δεξιότητες-στις-επιστήμες-της-αγωγής",
+    ],
+    "new_tech_innovation_didactics": [
+        "Οδηγός-Σπουδών-Μεταπτυχιακο-Νέες τεχνολογίες-καινοτομία-και-διδακτική",
+    ],
+    "intelligent_internet_technologies": [
+        "Οδηγός-Σπουδών-Μεταπτυχιακο-Ευφυείς-Τεχνολογίες-Διαδικτύου",
+    ],
+}
+
+POSTGRAD_GENERAL_SOURCES = ["Μεταπτυχιακών_Σπουδών"]
+
+POSTGRAD_PROGRAM_QUERY_ALIASES = {
+    "digital_soft_skills": [
+        "ψηφιακες και ηπιες δεξιοτητες στις επιστημες της αγωγης",
+        "ψηφιακες ηπιες δεξιοτητες",
+        "επιστημες της αγωγης",
+    ],
+    "new_tech_innovation_didactics": [
+        "νεες τεχνολογιες καινοτομια και διδακτικη",
+        "νεες τεχνολογιες καινοτομια",
+        "διδακτικη",
+    ],
+    "intelligent_internet_technologies": [
+        "ευφυεις τεχνολογιες διαδικτυου",
+        "ευφυεις τεχνολογιες",
+    ],
+}
+
+ALL_POSTGRAD_GUIDE_SOURCES = [
+    src for sources in POSTGRAD_PROGRAM_SOURCES.values() for src in sources
+]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -102,6 +187,209 @@ def normalize_query(q: str) -> str:
     q = q.lower()
     q = re.sub(r"\s+", " ", q)
     return q
+
+
+def _normalize_for_match(text: str) -> str:
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", str(text)).lower()
+    text = "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
+    text = re.sub(r"[^0-9a-zα-ω]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _source_from_item(item: Dict[str, Any]) -> str:
+    meta = item.get("meta") or {}
+    return str(item.get("source") or meta.get("source") or meta.get("filename") or "")
+
+
+def _source_from_meta(meta: Dict[str, Any]) -> str:
+    return str(meta.get("source") or meta.get("filename") or "")
+
+
+def _contains_any(text: str, patterns: List[str]) -> bool:
+    if not text:
+        return False
+    key = _normalize_for_match(text)
+    for pat in patterns:
+        p_key = _normalize_for_match(pat)
+        if p_key and p_key in key:
+            return True
+    return False
+
+
+def _canonical_program_label(raw_program: str) -> Optional[str]:
+    key = _normalize_for_match(raw_program)
+    for canonical, hints in PROGRAM_DETECTION_RULES.items():
+        if _contains_any(key, hints):
+            return canonical
+    return None
+
+
+def detect_program(query: str) -> Optional[str]:
+    q_key = _normalize_for_match(query)
+    for canonical, hints in PROGRAM_DETECTION_RULES.items():
+        if _contains_any(q_key, hints):
+            return canonical
+    return None
+
+
+def detect_question_category(query: str) -> str:
+    q_key = _normalize_for_match(query)
+    for category in ("fees", "duration", "admissions", "curriculum"):
+        if _contains_any(q_key, CATEGORY_KEYWORDS[category]):
+            return category
+    return "general"
+
+
+def analyze_query(query: str) -> Dict[str, Optional[str]]:
+    return {
+        "program": detect_program(query),
+        "category": detect_question_category(query),
+    }
+
+
+def infer_program_from_meta(meta: Dict[str, Any]) -> Optional[str]:
+    explicit = meta.get("program")
+    if explicit:
+        canonical = _canonical_program_label(str(explicit))
+        if canonical:
+            return canonical
+
+    source = _source_from_meta(meta)
+    for canonical, patterns in PROGRAM_SOURCE_PATTERNS.items():
+        if _match_any_pattern(source, patterns):
+            return canonical
+
+    return None
+
+
+def filter_metadata_by_program(metadata: List[Dict[str, Any]], program: Optional[str]) -> List[int]:
+    if not program:
+        return list(range(len(metadata)))
+
+    allowed: List[int] = []
+    for idx, meta in enumerate(metadata):
+        if infer_program_from_meta(meta) == program:
+            allowed.append(idx)
+    return allowed
+
+
+def _keyword_bonus_for_text(text: str, category: str) -> float:
+    terms = CATEGORY_BONUS_TERMS.get(category, [])
+    if not terms:
+        return 0.0
+    return CATEGORY_KEYWORD_BONUS if _contains_any(text, terms) else 0.0
+
+
+def apply_bonus_rerank(results: List[Dict[str, Any]], category: str, detected_program: Optional[str]) -> List[Dict[str, Any]]:
+    boosted: List[Dict[str, Any]] = []
+    for item in results:
+        meta = item.get("meta") or {}
+        text = str(meta.get("retrieval_text") or meta.get("text") or "")
+
+        keyword_bonus = _keyword_bonus_for_text(text, category)
+        chunk_program = infer_program_from_meta(meta)
+        program_bonus = PROGRAM_MATCH_BONUS if detected_program and chunk_program == detected_program else 0.0
+
+        base_score = float(item.get("score", 0.0))
+        final_score = base_score + keyword_bonus + program_bonus
+
+        item["base_score"] = base_score
+        item["keyword_bonus"] = keyword_bonus
+        item["program_match_bonus"] = program_bonus
+        item["score"] = final_score
+        boosted.append(item)
+
+    boosted.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+    return boosted
+
+
+def filtered_bm25_search(index: BM25Index,
+                         query: str,
+                         metadata: List[Dict[str, Any]],
+                         top_n: int,
+                         allowed_indices: Optional[List[int]] = None) -> List[Dict[str, Any]]:
+    if allowed_indices is None:
+        return index.search(query, top_n=top_n, metadata=metadata)
+
+    if not allowed_indices:
+        return []
+
+    scores = index.score_query(query)
+    ranked = sorted(
+        allowed_indices,
+        key=lambda i: scores[i] if 0 <= i < len(scores) else 0.0,
+        reverse=True,
+    )
+
+    out: List[Dict[str, Any]] = []
+    for idx in ranked[:top_n]:
+        if idx < 0 or idx >= len(scores):
+            continue
+        score = float(scores[idx])
+        if score <= 0:
+            continue
+        out.append({"index": int(idx), "score": score, "meta": metadata[idx]})
+    return out
+
+
+def _match_any_pattern(value: str, patterns: List[str]) -> bool:
+    if not value:
+        return False
+    value_key = _normalize_for_match(value)
+    for pattern in patterns:
+        p_key = _normalize_for_match(pattern)
+        if not p_key:
+            continue
+        if p_key in value_key or value_key in p_key:
+            return True
+    return False
+
+
+def _detect_postgrad_target_program(query: str) -> Optional[str]:
+    q_key = _normalize_for_match(query)
+    for program_key, aliases in POSTGRAD_PROGRAM_QUERY_ALIASES.items():
+        for alias in aliases:
+            if _normalize_for_match(alias) in q_key:
+                return program_key
+    return None
+
+
+def _is_postgrad_query(query: str) -> bool:
+    q_key = _normalize_for_match(query)
+    return any(hint in q_key for hint in POSTGRAD_QUERY_HINTS)
+
+
+def apply_query_source_priority(results: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    if not results:
+        return results
+
+    target_program = _detect_postgrad_target_program(query)
+    if not _is_postgrad_query(query) and target_program is None:
+        return results
+
+    boosted: List[Dict[str, Any]] = []
+    for item in results:
+        source = _source_from_item(item)
+        multiplier = 1.0
+
+        if source:
+            if target_program and _match_any_pattern(source, POSTGRAD_PROGRAM_SOURCES[target_program]):
+                multiplier = 14.0
+            elif _match_any_pattern(source, ALL_POSTGRAD_GUIDE_SOURCES):
+                multiplier = 7.0
+            elif _match_any_pattern(source, POSTGRAD_GENERAL_SOURCES):
+                multiplier = 3.0
+
+        score = float(item.get("score", 0.0))
+        if multiplier > 1.0:
+            item["score"] = score * multiplier + 0.01 * (multiplier - 1.0)
+
+        boosted.append(item)
+
+    boosted.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+    return boosted
 
 
 def build_query_for_embedding(q: str) -> str:
@@ -180,8 +468,23 @@ def embed_query(model: Any, query: str) -> np.ndarray:
 def search_index(q_emb: np.ndarray,
                  faiss_index: Optional[Any],
                  embeddings: Optional[np.ndarray],
-                 top_k: int = TOP_K):
+                 top_k: int = TOP_K,
+                 allowed_indices: Optional[List[int]] = None) -> Tuple[List[int], List[float]]:
     """Return (indices, scores) from FAISS or numpy fallback."""
+    if allowed_indices is not None:
+        if not allowed_indices:
+            return [], []
+        if embeddings is None:
+            raise RuntimeError("Embeddings are required for strict filtered dense retrieval")
+
+        idx_array = np.array(allowed_indices, dtype=np.int64)
+        sub_embeddings = embeddings[idx_array]
+        sims = sub_embeddings @ q_emb
+        local_top = np.argsort(-sims)[:top_k]
+        global_indices = [int(idx_array[i]) for i in local_top.tolist()]
+        global_scores = [float(sims[i]) for i in local_top.tolist()]
+        return global_indices, global_scores
+
     if faiss_index is not None:
         q = q_emb.astype(np.float32).reshape(1, -1)
         D, I = faiss_index.search(q, top_k)
@@ -248,23 +551,29 @@ def rerank_with_cross_encoder(cross_encoder_model_name: str, query: str, candida
     return sorted(candidates, key=lambda x: -x["score"])[:TOP_K]
 
 
-def merge_chunks(chunks: List[Dict[str, Any]], max_chars: int = MAX_CONTEXT_CHARS) -> str:
+def merge_chunks(chunks: List[Dict[str, Any]], max_chars: int = MAX_CONTEXT_CHARS) -> Tuple[str, int, bool]:
     parts = []
     total = 0
+    included = 0
+    truncated = False
     for c in chunks:
         text = c["meta"].get("retrieval_text") or c["meta"].get("text") or ""
         if not text:
             continue
         remain = max_chars - total
         if remain <= 0:
+            truncated = True
             break
         piece = text if len(text) <= remain else text[:remain] + "..."
+        if len(text) > remain:
+            truncated = True
         parts.append(f"[Source] {c['meta'].get('source')}\n{piece}")
         total += len(piece)
-    return "\n\n".join(parts)
+        included += 1
+    return "\n\n".join(parts), included, truncated
 
 
-def build_prompt_context(chunks: List[Dict[str, Any]], max_chars: int = MAX_CONTEXT_CHARS) -> str:
+def build_prompt_context(chunks: List[Dict[str, Any]], max_chars: int = MAX_CONTEXT_CHARS) -> Tuple[str, int, bool]:
     return merge_chunks(chunks, max_chars)
 
 
@@ -287,13 +596,47 @@ def retrieve(query: str,
              sparse_top_n: int = HYBRID_SPARSE_TOP_N,
              rrf_k: int = RRF_K,
              min_score: float = SCORE_THRESHOLD,
-             duplicate_thresh: float = 0.85) -> Dict[str, Any]:
+             duplicate_thresh: float = 0.85,
+             enable_program_filter_fallback: bool = False,
+             min_filtered_chunks_for_fallback: int = 5,
+             min_chunks_for_context: int = 15,
+             max_chunks_for_context: int = 20,
+             context_max_chars: int = MAX_CONTEXT_CHARS) -> Dict[str, Any]:
     """Run full retrieval pipeline and return final context + raw results."""
     q_norm = normalize_query(query)
+    analysis = analyze_query(q_norm)
+    detected_program = analysis.get("program")
+    category = str(analysis.get("category") or "general")
+
+    allowed_indices: Optional[List[int]] = None
+    fallback_used = False
+    filtered_corpus_size = len(metadata)
+
+    if detected_program is not None:
+        allowed_indices = filter_metadata_by_program(metadata, detected_program)
+        filtered_corpus_size = len(allowed_indices)
+
+        if (
+            enable_program_filter_fallback
+            and filtered_corpus_size < min_filtered_chunks_for_fallback
+        ):
+            allowed_indices = None
+            filtered_corpus_size = len(metadata)
+            fallback_used = True
+
     q_emb = embed_query(model, q_norm)
 
     dense_pool = max(top_k * 4, dense_top_n)
-    indices, scores = search_index(q_emb, faiss_index, embeddings, top_k=dense_pool)
+    if allowed_indices is not None:
+        dense_pool = min(dense_pool, max(len(allowed_indices), 1))
+
+    indices, scores = search_index(
+        q_emb,
+        faiss_index,
+        embeddings,
+        top_k=dense_pool,
+        allowed_indices=allowed_indices,
+    )
     dense_raw = build_results(metadata, indices, scores)
 
     retrieval_mode = "dense"
@@ -301,7 +644,13 @@ def retrieve(query: str,
     effective_min_score = min_score
 
     if bm25_index is not None:
-        sparse_raw = bm25_index.search(q_norm, top_n=sparse_top_n, metadata=metadata)
+        sparse_raw = filtered_bm25_search(
+            bm25_index,
+            q_norm,
+            metadata,
+            top_n=sparse_top_n,
+            allowed_indices=allowed_indices,
+        )
         fused = reciprocal_rank_fusion(
             [dense_raw[:dense_top_n], sparse_raw],
             rrf_k=rrf_k,
@@ -311,11 +660,32 @@ def retrieve(query: str,
         # RRF scores are rank-based and on a small range, so thresholding is disabled.
         effective_min_score = 0.0
 
+    raw = apply_query_source_priority(raw, q_norm)
+    raw = apply_bonus_rerank(raw, category=category, detected_program=detected_program)
+
     filtered = filter_results(raw, min_score=effective_min_score, duplicate_thresh=duplicate_thresh)
-    # optional rerank step could be added here
-    final = filtered[:top_k]
-    context = build_prompt_context(final)
-    return {"query": query, "results": final, "context": context, "mode": retrieval_mode}
+    # Select at least min_chunks_for_context (if available) and cap at max_chunks_for_context.
+    effective_max_chunks = max(max_chunks_for_context, min_chunks_for_context)
+    final_k = min(effective_max_chunks, max(min_chunks_for_context, top_k))
+    final = filtered[:final_k]
+    context, context_chunk_count, context_truncated = build_prompt_context(final, max_chars=context_max_chars)
+    return {
+        "query": query,
+        "results": final,
+        "context": context,
+        "mode": retrieval_mode,
+        "query_analysis": {
+            "program": detected_program,
+            "category": category,
+            "fallback_used": fallback_used,
+        },
+        "filtered_corpus_size": filtered_corpus_size,
+        "requested_top_k": top_k,
+        "final_result_count": len(final),
+        "context_chunk_count": context_chunk_count,
+        "context_truncated": context_truncated,
+        "context_char_len": len(context),
+    }
 
 
 if __name__ == "__main__":

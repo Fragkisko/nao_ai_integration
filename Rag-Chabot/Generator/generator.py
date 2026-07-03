@@ -48,6 +48,17 @@ def main():
     print()
     print(f'Απάντηση: "{answer}"')
 
+    debug = result.get("retrieval_debug") or {}
+    if debug:
+        print(
+            "Retrieval debug: "
+            f"requested_top_k={debug.get('requested_top_k')} "
+            f"selected_chunks={debug.get('final_result_count')} "
+            f"sent_to_llm={debug.get('context_chunk_count')} "
+            f"context_chars={debug.get('context_char_len')} "
+            f"truncated={debug.get('context_truncated')}"
+        )
+
     if args.show_chunks:
         for i, item in enumerate(result.get("chunks", []), start=1):
             print(format_chunk(item, i))
