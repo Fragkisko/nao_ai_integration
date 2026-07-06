@@ -333,8 +333,8 @@ class RAGEngine:
             dense_top_n=20,
             sparse_top_n=20,
             rrf_k=60,
-            min_chunks_for_context=15,
-            max_chunks_for_context=20,
+            min_chunks_for_context=5,
+            max_chunks_for_context=10,
             context_max_chars=12000,
         )
         _ = time() - _t0

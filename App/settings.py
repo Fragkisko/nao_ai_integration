@@ -51,6 +51,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except Exception:
+        return default
+
+
 @dataclass(frozen=True)
 class AppSettings:
     rag_model: str
@@ -74,12 +84,28 @@ class AppSettings:
     continuous_vad_stop_threshold_db: int
     continuous_vad_calibration_seconds: int
     continuous_speaking_tail_ms: int
+    stt_normalization_enabled: bool
+    stt_normalization_debug: bool
+    stt_norm_enable_entity_injections: bool
+    stt_norm_enable_gpt_normalization: bool
+    stt_norm_entity_lexicon_path: str
+    stt_normalization_use_gpt_fallback: bool
+    stt_normalization_gpt_model: str
+    stt_normalization_low_confidence: float
+    stt_normalization_entity_threshold: int
+    stt_normalization_max_ngram: int
+    stt_normalization_gpt_timeout_sec: int
 
 
 def build_settings() -> AppSettings:
+    stt_lexicon_default = str((PROJECT_ROOT / "App" / "stt_entity_lexicon.json"))
+    stt_norm_enable_gpt = _env_bool("STT_NORM_ENABLE_GPT_NORMALIZATION", True)
+    if "STT_NORM_USE_GPT_FALLBACK" in os.environ:
+        stt_norm_enable_gpt = _env_bool("STT_NORM_USE_GPT_FALLBACK", stt_norm_enable_gpt)
+
     return AppSettings(
         rag_model=os.environ.get("RAG_MODEL", "gpt-4o-mini"),
-        rag_top_k=_env_int("RAG_TOP_K", 30),
+        rag_top_k=_env_int("RAG_TOP_K", 10),
         rag_preload_retrieval_on_boot=_env_bool("RAG_PRELOAD_RETRIEVAL_ON_BOOT", True),
         rag_debug_chunks=_env_bool("RAG_DEBUG_CHUNKS", False),
         rag_fallback_reply="Δεν βρήκα αξιόπιστη απάντηση τώρα",
@@ -105,4 +131,15 @@ def build_settings() -> AppSettings:
         continuous_vad_stop_threshold_db=_env_int("CONT_VAD_STOP_THRESHOLD_DB", 6),
         continuous_vad_calibration_seconds=_env_int("CONT_VAD_CALIBRATION_SEC", 1),
         continuous_speaking_tail_ms=_env_int("CONT_SPEAKING_TAIL_MS", 400),
+        stt_normalization_enabled=_env_bool("STT_NORMALIZATION_ENABLED", True),
+        stt_normalization_debug=_env_bool("STT_NORMALIZATION_DEBUG", False),
+        stt_norm_enable_entity_injections=_env_bool("STT_NORM_ENABLE_ENTITY_INJECTIONS", True),
+        stt_norm_enable_gpt_normalization=stt_norm_enable_gpt,
+        stt_norm_entity_lexicon_path=os.environ.get("STT_NORM_ENTITY_LEXICON_PATH", stt_lexicon_default),
+        stt_normalization_use_gpt_fallback=stt_norm_enable_gpt,
+        stt_normalization_gpt_model=os.environ.get("STT_NORM_GPT_MODEL", "gpt-4o-mini"),
+        stt_normalization_low_confidence=_env_float("STT_NORM_LOW_CONFIDENCE", 0.82),
+        stt_normalization_entity_threshold=_env_int("STT_NORM_ENTITY_THRESHOLD", 86),
+        stt_normalization_max_ngram=_env_int("STT_NORM_MAX_NGRAM", 3),
+        stt_normalization_gpt_timeout_sec=_env_int("STT_NORM_GPT_TIMEOUT_SEC", 20),
     )

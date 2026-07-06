@@ -16,6 +16,11 @@ from nao_common import (
 )
 from nao_service import NAOContinuousAudioSource, run_nao_record_and_transcribe
 from rag_service import answer_query, init_rag_engine
+from speech_normalizer import (
+    SpeechNormalizer,
+    SpeechNormalizationResult,
+    build_speech_normalizer_from_env,
+)
 from speech_to_text import (
     ContinuousVADCapture,
     ContinuousVADConfig,
@@ -28,6 +33,31 @@ from speech_to_text import (
     transcribe_pcm16_with_whisper,
     transcribe_push_to_talk,
 )
+
+
+def _normalize_for_retrieval(
+    settings,
+    normalizer: SpeechNormalizer,
+    user_text: str,
+    *,
+    mode: str,
+) -> SpeechNormalizationResult:
+    result = normalizer.normalize(user_text)
+
+    if result.changed:
+        print("Κανονικοποίηση:", result.corrected_text)
+
+    if settings.stt_normalization_debug:
+        entities_str = ", ".join(result.matched_entities) if result.matched_entities else "-"
+        print(
+            "[STT-NORM] "
+            f"mode={mode} source={result.source} confidence={result.confidence:.2f} "
+            f"entities={entities_str} gpt={result.used_gpt}"
+        )
+        if result.gpt_error:
+            print(f"[STT-NORM] GPT fallback error: {result.gpt_error}")
+
+    return result
 
 
 def _append_stt_debug_row(settings, *, mode: str, stt_text: str, rag_answer: str = "", rag_error: str = "") -> None:
@@ -129,7 +159,15 @@ def _build_continuous_vad_config(settings) -> ContinuousVADConfig:
     )
 
 
-def _run_vad_dialog_loop(mode: str, settings, rag_module, rag_engine, whisper_model, vad_capture) -> None:
+def _run_vad_dialog_loop(
+    mode: str,
+    settings,
+    rag_module,
+    rag_engine,
+    whisper_model,
+    vad_capture,
+    normalizer: SpeechNormalizer,
+) -> None:
     state = "LISTENING"
     print(f"{mode.upper()} continuous conversation mode ενεργό.")
     print("Καταστάσεις: LISTENING -> PROCESSING -> SPEAKING")
@@ -162,7 +200,8 @@ def _run_vad_dialog_loop(mode: str, settings, rag_module, rag_engine, whisper_mo
             continue
 
         print("Καταγραφή:", user_text)
-        rag_result = answer_query(rag_engine, user_text)
+        normalized = _normalize_for_retrieval(settings, normalizer, user_text, mode=mode)
+        rag_result = answer_query(rag_engine, normalized.corrected_text)
 
         if settings.rag_debug_chunks and rag_module is not None:
             for i, item in enumerate(rag_result.get("chunks", []), start=1):
@@ -205,7 +244,7 @@ def _run_vad_dialog_loop(mode: str, settings, rag_module, rag_engine, whisper_mo
             _append_vad_metrics_row(settings, mode=mode, state=state, event="speaking_finished", metrics=metrics)
 
 
-def _run_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model) -> None:
+def _run_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model, normalizer: SpeechNormalizer) -> None:
     if whisper_model is None:
         print("[WARN] Continuous mode χρειάζεται Whisper STT αλλά δεν είναι διαθέσιμο.")
         return
@@ -221,14 +260,28 @@ def _run_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model) 
 
     try:
         with ContinuousVADCapture(vad_config, device_index=device_index) as vad_capture:
-            _run_vad_dialog_loop("vc", settings, rag_module, rag_engine, whisper_model, vad_capture)
+            _run_vad_dialog_loop(
+                "vc",
+                settings,
+                rag_module,
+                rag_engine,
+                whisper_model,
+                vad_capture,
+                normalizer,
+            )
     except KeyboardInterrupt:
         print("\n[INFO] Continuous mode stopped by user.")
     except Exception as e:
         print(f"[WARN] Continuous mode failed: {e}")
 
 
-def _run_nao_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model) -> None:
+def _run_nao_continuous_voice_mode(
+    settings,
+    rag_module,
+    rag_engine,
+    whisper_model,
+    normalizer: SpeechNormalizer,
+) -> None:
     if whisper_model is None:
         print("[WARN] NAO continuous mode χρειάζεται Whisper STT αλλά δεν είναι διαθέσιμο.")
         return
@@ -266,7 +319,15 @@ def _run_nao_continuous_voice_mode(settings, rag_module, rag_engine, whisper_mod
                     source_native_samplerate=nao_source.samplerate,
                     clear_external_buffer=nao_source.clear_buffer,
                 ) as vad_capture:
-                    _run_vad_dialog_loop("nv", settings, rag_module, rag_engine, whisper_model, vad_capture)
+                    _run_vad_dialog_loop(
+                        "nv",
+                        settings,
+                        rag_module,
+                        rag_engine,
+                        whisper_model,
+                        vad_capture,
+                        normalizer,
+                    )
             return
         except KeyboardInterrupt:
             print("\n[INFO] NAO continuous mode stopped by user.")
@@ -311,8 +372,18 @@ def main():
     print(f"STT whisper model={settings.stt_whisper_model}")
     print(f"STT language={settings.stt_language}")
     print(f"STT debug log enabled={settings.stt_debug_log_enabled}")
+    print(f"STT normalization enabled={settings.stt_normalization_enabled}")
+    print(f"STT normalization entity injections={settings.stt_norm_enable_entity_injections}")
+    print(f"STT normalization GPT fallback={settings.stt_normalization_use_gpt_fallback}")
+    print(f"STT normalization GPT model={settings.stt_normalization_gpt_model}")
+    print(f"STT normalization lexicon={settings.stt_norm_entity_lexicon_path}")
     if settings.stt_debug_log_enabled:
         print(f"STT debug log path={settings.stt_debug_log_path}")
+
+    normalizer = build_speech_normalizer_from_env(
+        enabled=settings.stt_normalization_enabled,
+        debug=settings.stt_normalization_debug,
+    )
 
     whisper_available = WHISPER_AVAILABLE
     whisper_model = None
@@ -367,15 +438,11 @@ def main():
                 print("[WARN] Δεν ανιχνεύτηκε κείμενο στην εγγραφή.")
                 continue
             print("Καταγραφή:", user_text)
-            if mode == "vs":
-                _append_stt_debug_row(settings, mode=mode, stt_text=user_text)
-                print("[DEBUG] STT-only mode: παράλειψη RAG/AI απάντησης.")
-                continue
         elif mode == "vc":
-            _run_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model)
+            _run_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model, normalizer)
             continue
         elif mode == "nv":
-            _run_nao_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model)
+            _run_nao_continuous_voice_mode(settings, rag_module, rag_engine, whisper_model, normalizer)
             continue
         elif mode == "n":
             if not whisper_available or whisper_model is None:
@@ -388,7 +455,17 @@ def main():
             print("Άγνωστη επιλογή — πάτα k, v, vs, vc, nv, n ή q")
             continue
 
-        rag_result = answer_query(rag_engine, user_text)
+        retrieval_text = user_text
+        if mode in {"v", "n"} and settings.stt_normalization_enabled:
+            normalized = _normalize_for_retrieval(settings, normalizer, user_text, mode=mode)
+            retrieval_text = normalized.corrected_text
+
+        if mode == "vs":
+            _append_stt_debug_row(settings, mode=mode, stt_text=user_text)
+            print("[DEBUG] STT-only mode: παράλειψη RAG/AI απάντησης.")
+            continue
+
+        rag_result = answer_query(rag_engine, retrieval_text)
 
         if settings.rag_debug_chunks and rag_module is not None:
             for i, item in enumerate(rag_result.get("chunks", []), start=1):
@@ -401,7 +478,7 @@ def main():
                 print(f"[WARN] {rag_error}")
             reply = settings.rag_fallback_reply
 
-        if mode in {"v", "vs"}:
+        if mode == "v":
             _append_stt_debug_row(
                 settings,
                 mode=mode,

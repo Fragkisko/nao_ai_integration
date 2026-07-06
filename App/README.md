@@ -173,6 +173,9 @@ python -c "from vosk import Model; m=Model(r'C:\Users\frag2\Documents\Diplomatik
 
 Το πρόγραμμα παίρνει το παραγόμενο `user_text` και το στέλνει στη RAG engine (`rag_engine.answer_query()`), μορφώνει την απάντηση και την εκφωνεί με `nao_say()`.
 
+Στα voice modes (`v`, `vc`, `nv`, `n`) η ροή γίνεται:
+Whisper transcript -> speech normalization (deterministic + optional GPT rewrite) -> RAG retrieval.
+
 Για καθαρό STT debugging χωρίς AI intent interpretation, χρησιμοποίησε το mode `vs`.
 
 Επιπλέον, το app γράφει CSV debug log για τα STT runs (`v` και `vs`) με πεδία:
@@ -205,6 +208,37 @@ python .\App\transcribe_wav.py --file .\Tests\nao_last.wav --no-vocab
 - `STT_DEBUG_LOG_ENABLED` : (προαιρετικό) αν είναι `1/true`, ενεργοποιεί CSV log για STT debug. Προεπιλογή `true`.
 - `STT_DEBUG_LOG_PATH` : (προαιρετικό) path του CSV debug log. Προεπιλογή `Tests/stt_debug_log.csv`.
 - `STT_LANGUAGE` : γλώσσα μεταγραφής για Whisper (π.χ. `el`). Προεπιλογή `el`.
+- `STT_NORMALIZATION_ENABLED` : ενεργοποίηση normalization layer μεταξύ Whisper και Retrieval (`1/true` ή `0/false`). Προεπιλογή `true`.
+- `STT_NORMALIZATION_DEBUG` : εκτυπώνει confidence/entities/source του normalization στο terminal. Προεπιλογή `false`.
+- `STT_NORM_ENABLE_ENTITY_INJECTIONS` : ενεργοποιεί/απενεργοποιεί τα deterministic phonetic/fuzzy entity injections. Προεπιλογή `true`.
+- `STT_NORM_ENABLE_GPT_NORMALIZATION` : ενεργοποιεί/απενεργοποιεί το GPT normalization fallback. Προεπιλογή `true`.
+- `STT_NORM_USE_GPT_FALLBACK` : legacy alias του `STT_NORM_ENABLE_GPT_NORMALIZATION` (διατηρείται για backward compatibility).
+- `STT_NORM_GPT_MODEL` : model για το rewrite fallback. Προεπιλογή `gpt-4o-mini`.
+- `STT_NORM_ENTITY_LEXICON_PATH` : path σε εξωτερικό JSON/YAML lexicon οντοτήτων. Προεπιλογή `App/stt_entity_lexicon.json`.
+- `STT_NORM_LOW_CONFIDENCE` : όριο confidence (0-1) κάτω από το οποίο καλείται GPT fallback. Προεπιλογή `0.82`.
+- `STT_NORM_ENTITY_THRESHOLD` : fuzzy score threshold (0-100) για deterministic entity replacement. Προεπιλογή `86`.
+- `STT_NORM_MAX_NGRAM` : μέγιστο n-gram για fuzzy entity matching. Προεπιλογή `3`.
+- `STT_NORM_GPT_TIMEOUT_SEC` : timeout σε δευτερόλεπτα για GPT rewrite call. Προεπιλογή `20`.
+- `OPENAI_API_KEY` : API key για GPT fallback rewrite.
+- `OPENAI_BASE_URL` : base URL του OpenAI-compatible endpoint. Προεπιλογή `https://api.openai.com/v1`.
+
+### Εξωτερικό entity lexicon (JSON/YAML)
+
+Το normalization module διαβάζει lexicon από το `STT_NORM_ENTITY_LEXICON_PATH`.
+Μπορείς να προσθέτεις/τροποποιείς terms χωρίς αλλαγή κώδικα.
+
+JSON παράδειγμα:
+
+```json
+{
+  "ΔΙΠΑΕ": ["διπαε", "zipaae", "διπα έκανε"],
+  "ΠΜΣ": ["που μου σου", "μεταπτυχιακο"],
+  "Σίνδος": ["σινδος", "συντος"]
+}
+```
+
+Εναλλακτικά, μπορείς να χρησιμοποιήσεις YAML με ισοδύναμη δομή.
+
 - `NAO_USER` : χρήστης για SSH στο NAO (default `nao`).
 - `NAO_IP` / `NAO_PORT` : διεύθυνση/θύρα του NAO — μπορούν να δοθούν και ως CLI args `--nao-ip`/`--nao-port`.
 - `NAO_ARECORD_DEVICE` : προαιρετικό συγκεκριμένο ALSA device για `arecord` στο `nv` mode (π.χ. `hw:0,0`).
