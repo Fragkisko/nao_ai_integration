@@ -8,16 +8,31 @@ Usage:
 import argparse
 import sys
 
-from rag_cli import RAGEngine, format_chunk
+from rag_cli import (
+    KNOWLEDGE_BASE_LABELS,
+    RAGEngine,
+    format_chunk,
+    normalize_knowledge_base_mode,
+    prompt_for_knowledge_base_mode,
+    resolve_knowledge_base_out_dir,
+)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--query", type=str, help="Optional query; if omitted you'll be prompted")
+    parser.add_argument(
+        "--kb-mode",
+        type=str,
+        choices=["bachelor", "master"],
+        help="knowledge-base mode to load",
+    )
     parser.add_argument("--show-chunks", dest="show_chunks", action="store_true", help="Print retrieved chunks after the answer")
     parser.add_argument("--no-show-chunks", dest="show_chunks", action="store_false", help="Do not print retrieved chunks")
     parser.set_defaults(show_chunks=True)
     args = parser.parse_args()
+
+    knowledge_base_mode = normalize_knowledge_base_mode(args.kb_mode) or prompt_for_knowledge_base_mode()
 
     if args.query:
         query = args.query.strip()
@@ -32,12 +47,14 @@ def main():
             sys.exit(1)
 
     engine = RAGEngine(
-        out="../Embedding/out",
+        out=str(resolve_knowledge_base_out_dir(knowledge_base_mode)),
         model="gpt-4o-mini",
         quiet=True,
         k=5,
         structured_mode="llm",
     )
+
+    print(f"Knowledge base: {KNOWLEDGE_BASE_LABELS[knowledge_base_mode]}")
 
     result = engine.answer_query(query)
     answer = (result.get("answer") or "").strip()

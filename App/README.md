@@ -34,6 +34,7 @@ python .\App\main.py
   - `MAX_TTS_LEN` : Μέγιστο μήκος κειμένου για TTS (χαρακτήρες). Προεπιλογή: `250`.
   - `RAG_MODEL` : RAG model override. Προεπιλογή: `gpt-4o-mini`.
   - `RAG_TOP_K` : Πόσα αποτελέσματα RAG να χρησιμοποιηθούν. Προεπιλογή: `5`.
+  - Στο startup του app ζητείται επιλογή knowledge base: `1 -> Undergraduate (Bachelor)` ή `2 -> Postgraduate (Master + PhD)`.
   - `RAG_PRELOAD_RETRIEVAL_ON_BOOT` : Αν είναι `1/true`, φορτώνει embedding retrieval resources στο startup για να μην υπάρχει καθυστέρηση στο πρώτο document query. Προεπιλογή: `1`.
   - `RAG_DEBUG_CHUNKS` : 0/1 or true/false για εκτύπωση chunks.
 

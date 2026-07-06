@@ -3,6 +3,49 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 
+KNOWLEDGE_BASE_LABELS = {
+    "bachelor": "Undergraduate (Bachelor)",
+    "master": "Postgraduate (Master + PhD)",
+}
+
+
+def normalize_knowledge_base_mode(raw_value: Optional[str]) -> Optional[str]:
+    if raw_value is None:
+        return None
+
+    value = raw_value.strip().lower()
+    aliases = {
+        "1": "bachelor",
+        "bachelor": "bachelor",
+        "undergraduate": "bachelor",
+        "2": "master",
+        "master": "master",
+        "postgraduate": "master",
+        "phd": "master",
+    }
+    return aliases.get(value)
+
+
+def prompt_for_knowledge_base_mode() -> str:
+    while True:
+        print("Select knowledge base:\n")
+        print("1 -> Undergraduate (Bachelor)")
+        print("2 -> Postgraduate (Master + PhD)")
+        choice = input("Selection: ").strip()
+        mode = normalize_knowledge_base_mode(choice)
+        if mode:
+            return mode
+        print("Invalid selection. Please choose 1 or 2.\n")
+
+
+def resolve_knowledge_base_out_dir(mode: str) -> Path:
+    normalized_mode = normalize_knowledge_base_mode(mode)
+    if normalized_mode is None:
+        raise ValueError(f"Unsupported knowledge base mode: {mode}")
+
+    return Path(__file__).resolve().parents[1] / "Rag-Chabot" / "knowledge_base" / normalized_mode
+
+
 def load_rag_cli_module():
     rag_cli_path = Path(__file__).resolve().parents[1] / "Rag-Chabot" / "Generator" / "rag_cli.py"
     spec = importlib.util.spec_from_file_location("rag_cli_runtime", str(rag_cli_path))
@@ -17,13 +60,14 @@ def init_rag_engine(
     model: str,
     top_k: int,
     preload_retrieval_on_boot: bool = True,
+    knowledge_base_mode: str = "bachelor",
 ) -> Tuple[Optional[Any], Optional[Any]]:
     rag_module = None
     rag_engine = None
     try:
         rag_module = load_rag_cli_module()
         rag_engine = rag_module.RAGEngine(
-            out="../Embedding/out",
+            out=str(resolve_knowledge_base_out_dir(knowledge_base_mode)),
             model=model,
             quiet=True,
             k=top_k,

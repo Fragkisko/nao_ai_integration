@@ -28,6 +28,48 @@ STRICT_RAG_SYSTEM_PROMPT = (
     "ΜΗΝ χρησιμοποιείς εξωτερική γνώση."
 )
 
+KNOWLEDGE_BASE_LABELS = {
+    "bachelor": "Undergraduate (Bachelor)",
+    "master": "Postgraduate (Master + PhD)",
+}
+
+
+def normalize_knowledge_base_mode(raw_value: Optional[str]) -> Optional[str]:
+    if raw_value is None:
+        return None
+
+    value = raw_value.strip().lower()
+    aliases = {
+        "1": "bachelor",
+        "bachelor": "bachelor",
+        "undergraduate": "bachelor",
+        "2": "master",
+        "master": "master",
+        "postgraduate": "master",
+        "phd": "master",
+    }
+    return aliases.get(value)
+
+
+def prompt_for_knowledge_base_mode() -> str:
+    while True:
+        print("Select knowledge base:\n")
+        print("1 -> Undergraduate (Bachelor)")
+        print("2 -> Postgraduate (Master + PhD)")
+        choice = input("Selection: ").strip()
+        mode = normalize_knowledge_base_mode(choice)
+        if mode:
+            return mode
+        print("Invalid selection. Please choose 1 or 2.\n")
+
+
+def resolve_knowledge_base_out_dir(mode: str) -> Path:
+    normalized_mode = normalize_knowledge_base_mode(mode)
+    if normalized_mode is None:
+        raise ValueError(f"Unsupported knowledge base mode: {mode}")
+
+    return Path(__file__).resolve().parents[1] / "knowledge_base" / normalized_mode
+
 
 def _load_dotenv_from_parents(start_dir: Path) -> None:
     """Best-effort .env loader without external dependency.
@@ -427,7 +469,13 @@ def format_chunk(item: dict, idx: int) -> str:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", type=str, default="../Embedding/out", help="embedding output folder")
+    parser.add_argument("--out", type=str, help="embedding output folder")
+    parser.add_argument(
+        "--kb-mode",
+        type=str,
+        choices=["bachelor", "master"],
+        help="knowledge-base mode to load when --out is not provided",
+    )
     parser.add_argument("--db-path", type=str, default="../IEE_IHU_DB/NAO_IEE_IHU_DB.db", help="SQLite DB path for structured staff answers")
     parser.add_argument("--api-base-url", type=str, default="https://api.openai.com/v1", help="OpenAI API base URL")
     parser.add_argument("--api-key-env", type=str, default="OPENAI_API_KEY", help="Environment variable that contains the OpenAI API key")
@@ -445,8 +493,14 @@ def main():
     )
     args = parser.parse_args()
 
+    resolved_out = args.out
+    selected_mode = None
+    if not resolved_out:
+        selected_mode = normalize_knowledge_base_mode(args.kb_mode) or prompt_for_knowledge_base_mode()
+        resolved_out = str(resolve_knowledge_base_out_dir(selected_mode))
+
     engine = RAGEngine(
-        out=args.out,
+        out=resolved_out,
         db_path=args.db_path,
         api_base_url=args.api_base_url,
         api_key_env=args.api_key_env,
@@ -455,6 +509,9 @@ def main():
         k=args.k,
         structured_mode=args.structured_mode,
     )
+
+    if selected_mode:
+        print(f"Knowledge base: {KNOWLEDGE_BASE_LABELS[selected_mode]}")
 
     def handle_query(q: str):
         result = engine.answer_query(q)

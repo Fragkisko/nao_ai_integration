@@ -15,7 +15,12 @@ from nao_common import (
     tts_clip,
 )
 from nao_service import NAOContinuousAudioSource, run_nao_record_and_transcribe
-from rag_service import answer_query, init_rag_engine
+from rag_service import (
+    KNOWLEDGE_BASE_LABELS,
+    answer_query,
+    init_rag_engine,
+    prompt_for_knowledge_base_mode,
+)
 from speech_normalizer import (
     SpeechNormalizer,
     SpeechNormalizationResult,
@@ -359,14 +364,17 @@ def _run_nao_continuous_voice_mode(
 
 def main():
     settings = build_settings()
+    knowledge_base_mode = prompt_for_knowledge_base_mode()
     rag_module, rag_engine = init_rag_engine(
         settings.rag_model,
         settings.rag_top_k,
         preload_retrieval_on_boot=settings.rag_preload_retrieval_on_boot,
+        knowledge_base_mode=knowledge_base_mode,
     )
 
     print(f"NAO: {NAO_IP}:{NAO_PORT}")
     print(f"RAG model={settings.rag_model}")
+    print(f"Knowledge base={KNOWLEDGE_BASE_LABELS[knowledge_base_mode]}")
     print(f"RAG preload retrieval on boot={settings.rag_preload_retrieval_on_boot}")
     print(f"RAG debug chunks={settings.rag_debug_chunks}")
     print(f"STT whisper model={settings.stt_whisper_model}")
