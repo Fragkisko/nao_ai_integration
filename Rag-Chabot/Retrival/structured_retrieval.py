@@ -54,6 +54,13 @@ _QUERY_STOPWORDS = {
 	"συντονίζει",
 	"συντονιστης",
 	"συντονιστής",
+	"γνωριζεις",
+	"γνωρίζεις",
+	"πες",
+	"πληροφοριες",
+	"πληροφορίες",
+	"θελω",
+	"θέλω",
 }
 
 
@@ -98,6 +105,22 @@ def should_route_to_staff_db(query: str) -> bool:
 	q = normalize_text(query)
 	if not q:
 		return False
+
+	# Natural staff entity lookup phrasing, even without the word "καθηγητής".
+	entity_patterns = (
+		r"\bτι\s+γνωριζεις\s+για\s+([\w\u0370-\u03ff]{4,})\b",
+		r"\bτι\s+γνωριζεις\s+για\s+τον\s+[\w\u0370-\u03ff]+\s+[\w\u0370-\u03ff]+\b",
+		r"\bτι\s+γνωριζεις\s+για\s+την\s+[\w\u0370-\u03ff]+\s+[\w\u0370-\u03ff]+\b",
+		r"\bπες\s+μου\s+πληροφοριες\s+για\s+([\w\u0370-\u03ff]{4,})\b",
+		r"\bπες\s+μου\s+πληροφοριες\s+για\s+τον\s+[\w\u0370-\u03ff]+\s+[\w\u0370-\u03ff]+\b",
+		r"\bπες\s+μου\s+πληροφοριες\s+για\s+την\s+[\w\u0370-\u03ff]+\s+[\w\u0370-\u03ff]+\b",
+		r"\bθελω\s+πληροφοριες\s+για\s+([\w\u0370-\u03ff]{4,})\b",
+		r"\bθελω\s+πληροφοριες\s+για\s+τον\s+[\w\u0370-\u03ff]+\s+[\w\u0370-\u03ff]+\b",
+		r"\bθελω\s+πληροφοριες\s+για\s+την\s+[\w\u0370-\u03ff]+\s+[\w\u0370-\u03ff]+\b",
+	)
+	if any(re.search(p, q) for p in entity_patterns):
+		return True
+
 	keywords = (
 		"ποιος",
 		"ποια",

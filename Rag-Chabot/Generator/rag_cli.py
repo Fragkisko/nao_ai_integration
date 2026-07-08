@@ -121,6 +121,14 @@ def load_structured_retrieval_module(rag_root: Path):
     return mod
 
 
+def load_structured_courses_module(rag_root: Path):
+    structured_path = rag_root / "Retrival" / "structured_courses.py"
+    spec = importlib.util.spec_from_file_location("structured_courses", str(structured_path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def openai_chat(api_base_url: str,
                 api_key: str,
                 model: str,
@@ -186,6 +194,7 @@ def build_prompt_from_structured_facts(query: str, structured_answer: dict) -> s
         "Θα απαντήσεις σε φοιτητή με φυσικό, σύντομο, ανθρώπινο ύφος.\n"
         "Χρησιμοποίησε ΑΠΟΚΛΕΙΣΤΙΚΑ τα FACTS που δίνονται παρακάτω.\n"
         "Απαγορεύεται να προσθέσεις πληροφορία που δεν υπάρχει στα FACTS.\n"
+        "Απαγορεύεται να αντιφάσκεις με τα FACTS.\n"
         "Αν λείπει πεδίο, πες ότι δεν υπάρχει διαθέσιμη πληροφορία.\n"
         "Μέγιστο 3 προτάσεις.\n\n"
         f"Πηγή: {source_table}\n"
@@ -194,6 +203,40 @@ def build_prompt_from_structured_facts(query: str, structured_answer: dict) -> s
         f"Ερώτηση χρήστη: {query}\n"
         "Δώσε τελική απάντηση στα ελληνικά."
     )
+
+
+def _structured_llm_answer_is_contradictory(llm_answer: str, structured_answer: dict) -> bool:
+    text = (llm_answer or "").strip().lower()
+    if not text:
+        return True
+
+    operation = (structured_answer.get("operation") or "").strip().lower()
+    payload = structured_answer.get("payload") or {}
+
+    denial_markers = (
+        "δεν υπαρχει διαθεσιμη πληροφορια",
+        "δεν υπάρχει διαθέσιμη πληροφορία",
+        "δεν βρεθη",
+        "δεν βρέθη",
+    )
+    has_denial = any(marker in text for marker in denial_markers)
+
+    if operation == "count_courses":
+        total = int(payload.get("total_count") or 0)
+        if total > 0 and has_denial:
+            return True
+
+    if operation == "list_courses":
+        total = int(payload.get("row_count") or 0)
+        if total > 0 and has_denial:
+            return True
+
+    if operation == "sum_ects":
+        total = float(payload.get("total_ects") or 0)
+        if total > 0 and has_denial:
+            return True
+
+    return False
 
 
 def render_structured_answer(query: str, structured_answer: dict, args) -> str:
@@ -249,6 +292,7 @@ class RAGEngine:
         self.rag_root = Path(__file__).resolve().parents[1]
         self.retrieval = load_retrieval_module(self.rag_root)
         self.structured = load_structured_retrieval_module(self.rag_root)
+        self.structured_courses = load_structured_courses_module(self.rag_root)
 
         self.generator_dir = Path(__file__).resolve().parent
         self.db_path = self._resolve_path(self.db_path_arg)
@@ -329,6 +373,8 @@ class RAGEngine:
                 temperature=0.2,
             ).strip()
             if llm_answer:
+                if _structured_llm_answer_is_contradictory(llm_answer, structured_answer):
+                    return (structured_answer.get("answer") or "").strip()
                 return llm_answer
         except Exception:
             pass
@@ -340,15 +386,28 @@ class RAGEngine:
         if not q:
             return {"answer": None, "chunks": [], "error": "Empty query", "route": "none"}
 
-        if self.structured.should_route_to_courses_db(q):
-            course_answer = self.structured.answer_course_query(q, self.db_path)
-            if course_answer is not None:
+        routing_trace: Dict[str, Any] = {}
+        structured_course_result = self.structured_courses.answer_course_query_structured(
+            q,
+            self.db_path,
+            list_limit=7,
+        )
+        if structured_course_result is not None:
+            should_fallback = bool(structured_course_result.get("should_fallback_to_rag"))
+            routing_trace["courses_structured"] = {
+                "matched": True,
+                "operation": structured_course_result.get("operation"),
+                "confidence": structured_course_result.get("confidence"),
+                "fallback_to_rag": should_fallback,
+            }
+            if not should_fallback:
                 return {
-                    "answer": self._render_structured_answer(q, course_answer),
+                    "answer": self._render_structured_answer(q, structured_course_result),
                     "chunks": [],
                     "error": None,
                     "route": "courses_db",
-                    "source": course_answer,
+                    "source": structured_course_result,
+                    "routing_trace": routing_trace,
                 }
 
         if self.structured.should_route_to_staff_db(q):
@@ -360,6 +419,7 @@ class RAGEngine:
                     "error": None,
                     "route": "staff_db",
                     "source": staff_answer,
+                    "routing_trace": routing_trace,
                 }
 
         self._ensure_retrieval_loaded()
@@ -389,6 +449,7 @@ class RAGEngine:
                 "error": None,
                 "route": "retrieval",
                 "query_analysis": res.get("query_analysis", {}),
+                "routing_trace": routing_trace,
             }
 
         prompt = build_prompt_from_context(context, q)
@@ -400,6 +461,7 @@ class RAGEngine:
                     "chunks": res.get("results", []),
                     "error": f"Missing API key in env var: {self.api_key_env}",
                     "route": "retrieval",
+                    "routing_trace": routing_trace,
                 }
             answer = openai_chat(
                 self.api_base_url,
@@ -417,6 +479,7 @@ class RAGEngine:
                 "chunks": res.get("results", []),
                 "error": f"OpenAI call failed: {e}",
                 "route": "retrieval",
+                "routing_trace": routing_trace,
             }
 
         return {
@@ -425,6 +488,7 @@ class RAGEngine:
             "error": None,
             "route": "retrieval",
             "query_analysis": res.get("query_analysis", {}),
+            "routing_trace": routing_trace,
             "retrieval_debug": {
                 "requested_top_k": res.get("requested_top_k"),
                 "final_result_count": res.get("final_result_count"),
