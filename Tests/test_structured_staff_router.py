@@ -51,3 +51,14 @@ def test_non_staff_concept_query_not_routed_to_staff():
     query = "εξηγησε μου τι ειναι νευρωνικα δικτυα"
 
     assert sr.should_route_to_staff_db(query) is False
+
+
+def test_staff_count_query_answered_structured():
+    sr = _load_structured_staff_module()
+    query = "Πόσοι καθηγητές υπάρχουν στο τμήμα και πόσοι στο ΔΙΠΑΕ γενικά"
+
+    assert sr.should_route_to_staff_db(query) is True
+    result = sr.answer_staff_query(query, DB_PATH)
+    assert result is not None
+    assert result.get("operation") == "count_staff"
+    assert int(result.get("total_count") or 0) > 0

@@ -172,7 +172,17 @@ def load_or_build_bm25_index(path: Path,
                              k1: float = 1.5,
                              b: float = 0.75) -> BM25Index:
     if path.exists():
-        return load_bm25_index(path)
+        try:
+            loaded = load_bm25_index(path)
+            expected_docs = len(metadata)
+            if (
+                loaded.doc_count == expected_docs
+                and len(loaded.doc_tfs) == expected_docs
+                and len(loaded.doc_lens) == expected_docs
+            ):
+                return loaded
+        except Exception:
+            pass
 
     index = build_bm25_index(metadata, k1=k1, b=b)
     save_bm25_index(index, path)

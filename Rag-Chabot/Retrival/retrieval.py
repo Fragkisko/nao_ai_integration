@@ -449,7 +449,9 @@ def format_results(results: List[Dict[str, Any]]) -> str:
     out_lines = []
     for r in results:
         score = r["score"]
-        meta = r["meta"]
+        meta = r.get("meta") if isinstance(r, dict) else {}
+        if not isinstance(meta, dict):
+            meta = {}
         text = _trim_context(meta.get("retrieval_text") or meta.get("text") or "", MAX_CONTEXT_CHARS)
         out_lines.append(f"score={score:.4f} source={meta.get('source')} section={meta.get('section')}\n{text}\n----")
     return "\n".join(out_lines)
@@ -520,9 +522,22 @@ def filter_results(results: List[Dict[str, Any]],
     filtered = []
     seen_texts: List[str] = []
     for r in results:
-        if r["score"] < min_score:
+        score = float(r.get("score", 0.0)) if isinstance(r, dict) else 0.0
+        if score < min_score:
             continue
-        text = (r["meta"].get("retrieval_text") or r["meta"].get("text") or "").strip()
+
+        meta = r.get("meta") if isinstance(r, dict) else {}
+        if not isinstance(meta, dict):
+            meta = {}
+
+        # Some fused candidates may not carry metadata; ignore non-informative chunks.
+        text = (
+            meta.get("retrieval_text")
+            or meta.get("text")
+            or (r.get("retrieval_text") if isinstance(r, dict) else "")
+            or (r.get("text") if isinstance(r, dict) else "")
+            or ""
+        ).strip()
         if len(text) < min_chars:
             continue
         dup = False
@@ -557,7 +572,16 @@ def merge_chunks(chunks: List[Dict[str, Any]], max_chars: int = MAX_CONTEXT_CHAR
     included = 0
     truncated = False
     for c in chunks:
-        text = c["meta"].get("retrieval_text") or c["meta"].get("text") or ""
+        meta = c.get("meta") if isinstance(c, dict) else {}
+        if not isinstance(meta, dict):
+            meta = {}
+        text = (
+            meta.get("retrieval_text")
+            or meta.get("text")
+            or (c.get("retrieval_text") if isinstance(c, dict) else "")
+            or (c.get("text") if isinstance(c, dict) else "")
+            or ""
+        )
         if not text:
             continue
         remain = max_chars - total
@@ -567,7 +591,7 @@ def merge_chunks(chunks: List[Dict[str, Any]], max_chars: int = MAX_CONTEXT_CHAR
         piece = text if len(text) <= remain else text[:remain] + "..."
         if len(text) > remain:
             truncated = True
-        parts.append(f"[Source] {c['meta'].get('source')}\n{piece}")
+        parts.append(f"[Source] {meta.get('source')}\n{piece}")
         total += len(piece)
         included += 1
     return "\n\n".join(parts), included, truncated

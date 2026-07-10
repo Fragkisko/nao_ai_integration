@@ -100,11 +100,24 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
 	return out
 
 
+def _is_staff_count_query(query: str) -> bool:
+	q = normalize_text(query)
+	if not q:
+		return False
+
+	count_terms = ("how many", "count", "ποσοι", "ποσα", "πληθος", "number of")
+	staff_terms = ("καθηγητ", "staff", "μελη δεπ", "διδασκ", "faculty")
+	return any(t in q for t in count_terms) and any(t in q for t in staff_terms)
+
+
 def should_route_to_staff_db(query: str) -> bool:
 	"""Heuristic router for staff/professor style questions."""
 	q = normalize_text(query)
 	if not q:
 		return False
+
+	if _is_staff_count_query(q):
+		return True
 
 	# Natural staff entity lookup phrasing, even without the word "καθηγητής".
 	entity_patterns = (
@@ -247,6 +260,39 @@ def build_staff_answer(staff_row: Dict[str, Any]) -> str:
 
 def answer_staff_query(query: str, db_path: Path, min_score: float = 3.0) -> Optional[Dict[str, Any]]:
 	"""Return structured answer dict for staff query or None if no reliable hit."""
+	if _is_staff_count_query(query):
+		rows = _fetch_staff_rows(db_path)
+		if not rows:
+			return None
+
+		unique_staff = {
+			str((r.get("staff_id") if r.get("staff_id") is not None else r.get("full_name") or "")).strip()
+			for r in rows
+		}
+		total_count = len({x for x in unique_staff if x})
+		q = normalize_text(query)
+		mentions_dipae_general = ("διπαε" in q or "dipae" in q) and (
+			"γενικα" in q or "overall" in q or "συνολικ" in q
+		)
+
+		if mentions_dipae_general:
+			answer = (
+				f"Στη βάση δεδομένων του τμήματος υπάρχουν {total_count} καθηγητές/μέλη ΔΕΠ. "
+				"Δεν υπάρχει ξεχωριστό σύνολο για όλα τα τμήματα του ΔΙΠΑΕ, "
+				"οπότε δεν μπορώ να δώσω αξιόπιστο γενικό πλήθος."
+			)
+		else:
+			answer = f"Στη βάση δεδομένων του τμήματος υπάρχουν {total_count} καθηγητές/μέλη ΔΕΠ."
+
+		return {
+			"query": query,
+			"score": 10.0,
+			"source_table": DB_TABLE_STAFF,
+			"operation": "count_staff",
+			"total_count": total_count,
+			"answer": answer,
+		}
+
 	match = find_best_staff_match(query, db_path)
 	if match is None:
 		return None

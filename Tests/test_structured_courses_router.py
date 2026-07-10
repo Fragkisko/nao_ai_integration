@@ -49,3 +49,15 @@ def test_aggregation_count_courses():
     assert result.get("operation") == "count_courses"
     total = int(result.get("payload", {}).get("total_count") or 0)
     assert total > 0
+
+
+def test_non_course_how_many_not_forced_to_course_count():
+    sc = _load_structured_courses_module()
+    result = sc.answer_course_query_structured("ποσα ειναι ολα τα τμηματα του ΔΙΠΑΕ", DB_PATH)
+
+    if result is None:
+        assert True
+        return
+
+    # Must avoid wrong course aggregation for generic organization-level counts.
+    assert result.get("operation") != "count_courses"

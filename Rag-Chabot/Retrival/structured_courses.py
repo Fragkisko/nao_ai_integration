@@ -379,6 +379,18 @@ def _detect_operation(query: str) -> Optional[str]:
     if not q:
         return None
 
+    course_context_markers = (
+        "μαθημ",
+        "course",
+        "κωδικ",
+        "κωδ",
+        "ects",
+        "συντονισ",
+        "coordinator",
+        "εξαμην",
+        "semester",
+    )
+
     # Program-level duration questions should not be interpreted as course listing/counting.
     if (
         ("διαρκεια" in q or "διάρκεια" in q)
@@ -390,6 +402,8 @@ def _detect_operation(query: str) -> Optional[str]:
         return "study_duration"
 
     if any(k in q for k in ("how many", "ποσα", "πόσα", "count", "πληθος", "πλήθος")):
+        if not any(k in q for k in course_context_markers):
+            return None
         if "ects" in q or "μοναδ" in q:
             return "sum_ects"
         if "per " in q or "by " in q or "ανα " in q or "ανά " in q or "group" in q:
@@ -416,7 +430,6 @@ def _detect_operation(query: str) -> Optional[str]:
         return "course_entity_lookup"
 
     list_markers = ("list", "show", "which", "δωσε", "δώσε")
-    course_context_markers = ("μαθημ", "course", "κωδικ", "κωδ", "ects", "συντονισ")
     if any(k in q for k in list_markers):
         return "list_courses"
 
