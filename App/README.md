@@ -37,6 +37,8 @@ python .\App\main.py
   - Στο startup του app ζητείται επιλογή knowledge base: `1 -> Undergraduate (Bachelor)` ή `2 -> Postgraduate (Master + PhD)`.
   - `RAG_PRELOAD_RETRIEVAL_ON_BOOT` : Αν είναι `1/true`, φορτώνει embedding retrieval resources στο startup για να μην υπάρχει καθυστέρηση στο πρώτο document query. Προεπιλογή: `1`.
   - `RAG_DEBUG_CHUNKS` : 0/1 or true/false για εκτύπωση chunks.
+  - `FAQ_THRESHOLD` : semantic similarity threshold για FAQ semantic layer (default `0.88`).
+  - `ENABLE_FAQ_REPHRASE` : αν είναι `1/true`, η authoritative FAQ απάντηση περνά από LLM μόνο για friendly rephrase χωρίς αλλαγή facts (default `false`).
 
 - Optional tuning:
   - `OLLAMA_SYSTEM`, `OLLAMA_TIMEOUT_SEC`, `OLLAMA_TEMPERATURE` — για παραμετροποίηση Ollama calls.
@@ -200,6 +202,8 @@ python .\App\transcribe_wav.py --file .\Tests\nao_last.wav --no-vocab
 - `RAG_TOP_K` : αριθμός κορυφαίων chunks για RAG (default `5`).
 - `RAG_PRELOAD_RETRIEVAL_ON_BOOT` : αν είναι `1/true`, κάνει preload το embedding model + retrieval index στο startup (default `1`).
 - `RAG_DEBUG_CHUNKS` : ενεργοποιεί εκτύπωση chunks (0/1).
+- `FAQ_THRESHOLD` : κατώφλι semantic match για FAQ layer (0-1). Αν περάσει, επιστρέφεται FAQ απάντηση και σταματάει το RAG retrieval.
+- `ENABLE_FAQ_REPHRASE` : αν είναι `1/true`, γίνεται optional LLM rephrase της FAQ απάντησης (χωρίς αλλαγή facts).
 - `VOSK_MODEL_PATH` : path στον φάκελο του VOSK μοντέλου (π.χ. `C:\...\vosk-model-el-gr-0.7`).
 - `SOUNDDEVICE_DEVICE` : (προαιρετικό) index της εισόδου ήχου για `sounddevice`.
 - `STT_VOCAB` : (προαιρετικό) comma-separated custom λέξεις/ονόματα για VOSK grammar injection.

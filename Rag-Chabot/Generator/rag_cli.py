@@ -140,6 +140,14 @@ def load_structured_courses_module(rag_root: Path):
     return mod
 
 
+def load_semantic_faq_module(rag_root: Path):
+    faq_path = rag_root / "faq" / "semantic_faq.py"
+    spec = importlib.util.spec_from_file_location("semantic_faq", str(faq_path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def openai_chat(api_base_url: str,
                 api_key: str,
                 model: str,
@@ -294,6 +302,18 @@ class RAGEngine:
 
         _load_dotenv_from_parents(Path(__file__).resolve().parent)
 
+        self.faq_threshold = float(os.environ.get("FAQ_THRESHOLD", "0.88"))
+        self.enable_faq_rephrase = os.environ.get("ENABLE_FAQ_REPHRASE", "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self.faq_preload_on_boot = os.environ.get(
+            "FAQ_PRELOAD_ON_BOOT",
+            "true" if self.preload_retrieval_on_boot else "false",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
         if self.quiet:
             logging.basicConfig(level=logging.WARNING)
             for logger_name in ("httpx", "sentence_transformers", "huggingface_hub", "transformers", "retrieval"):
@@ -304,9 +324,11 @@ class RAGEngine:
         self.retrieval = load_retrieval_module(self.rag_root)
         self.structured = load_structured_retrieval_module(self.rag_root)
         self.structured_courses = load_structured_courses_module(self.rag_root)
+        self.semantic_faq_module = load_semantic_faq_module(self.rag_root)
 
         self.generator_dir = Path(__file__).resolve().parent
         self.db_path = self._resolve_path(self.db_path_arg)
+        self.faq_dir = self.rag_root / "faq"
 
         self.loaded_retrieval = False
         self.meta = None
@@ -315,11 +337,107 @@ class RAGEngine:
         self.bm25_idx = None
         self.model = None
 
+        self.faq_searcher = None
+        try:
+            self.faq_searcher = self.semantic_faq_module.SemanticFAQSearcher(
+                faq_dir=self.faq_dir,
+                threshold=self.faq_threshold,
+                model_name=getattr(self.retrieval, "EMBEDDING_MODEL_NAME", "intfloat/multilingual-e5-base"),
+                preload_model=False,
+            )
+        except Exception as e:
+            print(f"[WARN] FAQ semantic search unavailable: {e}")
+
         if self.preload_retrieval_on_boot:
             try:
                 self._ensure_retrieval_loaded()
             except Exception as e:
                 print(f"[WARN] Retrieval preload on boot failed: {e}")
+
+        if self.faq_searcher is not None and self.faq_preload_on_boot:
+            try:
+                # Reuse already-loaded retrieval embedding model when available.
+                if self.model is not None and getattr(self.faq_searcher, "model", None) is None:
+                    self.faq_searcher.model = self.model
+                self.faq_searcher._ensure_model_loaded()
+                print("FAQ semantic layer ready.")
+            except Exception as e:
+                print(f"[WARN] FAQ preload on boot failed: {e}")
+
+    @staticmethod
+    def _clean_faq_rephrase_output(text: str, fallback: str) -> str:
+        out = (text or "").strip()
+        if not out:
+            return fallback
+
+        # If the model emits labels, keep only the useful final answer body.
+        markers = [
+            "friendly answer:",
+            "τελικη απαντηση:",
+            "τελική απάντηση:",
+            "απαντηση:",
+            "απάντηση:",
+        ]
+        lowered = out.lower()
+        for marker in markers:
+            idx = lowered.rfind(marker)
+            if idx != -1:
+                out = out[idx + len(marker) :].strip()
+                break
+
+        cleaned_lines = []
+        for line in out.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            pref = stripped.lower()
+            if pref.startswith("user question:") or pref.startswith("faq question:"):
+                continue
+            if pref.startswith("authoritative answer:"):
+                stripped = stripped.split(":", 1)[1].strip() if ":" in stripped else stripped
+            cleaned_lines.append(stripped)
+
+        final = " ".join(cleaned_lines).strip() or fallback
+        return final
+
+    def _rephrase_faq_answer(self, query: str, faq_match: dict) -> str:
+        answer = (faq_match.get("answer") or "").strip()
+        if not answer:
+            return answer
+
+        if not self.enable_faq_rephrase:
+            return answer
+
+        faq_item = faq_match.get("matched_faq") or {}
+        prompt = (
+            "Ερώτηση χρήστη:\n"
+            f"{query}\n\n"
+            "FAQ ερώτηση:\n"
+            f"{faq_item.get('question', '')}\n\n"
+            "Authoritative answer:\n"
+            f"{answer}\n\n"
+            "Δώσε ΜΟΝΟ το τελικό κείμενο απάντησης, χωρίς labels, χωρίς εισαγωγές, χωρίς bullets."
+        )
+        try:
+            api_key = os.environ.get(self.api_key_env, "").strip()
+            if not api_key:
+                return answer
+
+            refined = openai_chat(
+                self.api_base_url,
+                api_key,
+                self.model_name,
+                prompt,
+                temperature=0.0,
+                system_prompt=(
+                    "You are NAO. Rewrite the answer in friendly conversational Greek. "
+                    "Do not change facts. Do not add or remove factual content. "
+                    "Return only the final answer text without any labels."
+                ),
+            ).strip()
+            return self._clean_faq_rephrase_output(refined, answer)
+        except Exception:
+            return answer
 
     def _resolve_path(self, raw_path: str) -> Path:
         path_obj = Path(raw_path)
@@ -432,6 +550,30 @@ class RAGEngine:
                     "source": staff_answer,
                     "routing_trace": routing_trace,
                 }
+
+        faq_match = None
+        if self.faq_searcher is not None:
+            try:
+                faq_match = self.faq_searcher.search(q)
+            except Exception as e:
+                routing_trace["faq_error"] = str(e)
+
+        if faq_match is not None:
+            faq_answer = self._rephrase_faq_answer(q, faq_match)
+            routing_trace["faq"] = {
+                "matched": True,
+                "score": faq_match.get("score"),
+                "threshold": faq_match.get("threshold"),
+                "faq_id": (faq_match.get("matched_faq") or {}).get("id"),
+            }
+            return {
+                "answer": faq_answer,
+                "chunks": [],
+                "error": None,
+                "route": "faq",
+                "source": faq_match,
+                "routing_trace": routing_trace,
+            }
 
         self._ensure_retrieval_loaded()
         _t0 = time()
