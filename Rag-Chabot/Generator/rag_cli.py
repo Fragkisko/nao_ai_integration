@@ -23,15 +23,17 @@ from typing import Any, Dict, List, Optional
 
 NO_EVIDENCE_ANSWER = "Δεν βρέθηκε σχετική πληροφορία."
 STRICT_RAG_SYSTEM_PROMPT = (
-   "You are a helpful assistant. Use the provided context to answer precisely. in Greek. "
+   "You are a helpful assistant. Use the provided context to answer precisely. Answer in Greek. "
     "Your personality:\n"
     "- friendly\n"
     "- polite\n"
     "- concise\n"
     "- helpful\n"
     "- conversational\n"
-    "Αν η απάντηση δεν υπάρχει στα αποσπάσματα, απάντησε ακριβώς: \"Δεν βρέθηκε σχετική πληροφορία.\" "
-    "ΜΗΝ χρησιμοποιείς εξωτερική γνώση."
+    "Αν η απάντηση δεν υπάρχει στα αποσπάσματα, απάντησε με ένα σύντομο, ευγενικό μήνυμα στα Ελληνικά "
+    "που εξηγεί ότι η πληροφορία δεν είναι διαθέσιμη στη βάση γνώσης και προτρέπει τον χρήστη να "
+    "επαναδιατυπώσει ή να δώσει πιο συγκεκριμένα στοιχεία. "
+    "ΜΗΝ χρησιμοποιείς εξωτερική γνώση.\n"
     "When answering:\n"
     "- imagine you are speaking directly with a student\n"
     "- explain things simply\n"
@@ -510,6 +512,52 @@ class RAGEngine:
 
         return (structured_answer.get("answer") or "").strip()
 
+    def _generate_no_info_response(self, query: str) -> str:
+        """Produce a friendly Greek response when no evidence is available.
+
+        Tries the LLM if an API key is available; falls back to a short deterministic template.
+        """
+        # Short deterministic fallback (under 60 words)
+        fallback = (
+            "Λυπάμαι, η πληροφορία αυτή δεν είναι διαθέσιμη στη βάση γνώσης μου. "
+            "Μπορείτε να επαναδιατυπώσετε την ερώτηση ή να δώσετε πιο συγκεκριμένα στοιχεία?"
+        )
+
+        try:
+            api_key = os.environ.get(self.api_key_env, "").strip()
+            if not api_key:
+                return fallback
+
+            system_prompt = (
+                "You are a helpful assistant. Generate a friendly, concise Greek response following rules:\n"
+                "- Never output the English phrase 'No information found' or the exact Greek phrase "
+                "'Δεν βρέθηκε σχετική πληροφορία.'\n"
+                "- Politely explain that the information is not available in your knowledge base.\n"
+                "- Encourage the user to rephrase the question or provide more specific details.\n"
+                "- Keep the response under 60 words and return only the final response text (Greek).\n"
+            )
+
+            user_prompt = f"Ερώτηση χρήστη: {query}\n\nΠαραγωγή: Δώσε μία φιλική, σύντομη απάντηση στα ελληνικά σύμφωνα με τους παραπάνω κανόνες."
+
+            resp = openai_chat(self.api_base_url, api_key, self.model_name, user_prompt, temperature=0.0, system_prompt=system_prompt)
+            out = (resp or "").strip()
+            if not out:
+                return fallback
+
+            lowered = out.lower()
+            banned_fragments = ("no information found", "δεν βρέθηκε σχετική πληροφορία", "δεν βρεθηκε σχετικη πληροφορια")
+            if any(b in lowered for b in banned_fragments):
+                return fallback
+
+            # Enforce length <= 60 words
+            word_count = len([w for w in out.split() if w])
+            if word_count > 60:
+                return fallback
+
+            return out
+        except Exception:
+            return fallback
+
     def answer_query(self, query: str) -> Dict[str, Any]:
         q = (query or "").strip()
         if not q:
@@ -596,8 +644,9 @@ class RAGEngine:
 
         context = res.get("context", "")
         if not res.get("results"):
+            no_info = self._generate_no_info_response(q)
             return {
-                "answer": NO_EVIDENCE_ANSWER,
+                "answer": no_info,
                 "chunks": [],
                 "error": None,
                 "route": "retrieval",
@@ -625,7 +674,12 @@ class RAGEngine:
                 system_prompt=STRICT_RAG_SYSTEM_PROMPT,
             ).strip()
             if not answer:
-                answer = NO_EVIDENCE_ANSWER
+                answer = self._generate_no_info_response(q)
+            else:
+                lowered = (answer or "").lower()
+                banned_fragments = ("no information found", "δεν βρέθηκε σχετική πληροφορία", "δεν βρεθηκε σχετικη πληροφορια")
+                if any(b in lowered for b in banned_fragments):
+                    answer = self._generate_no_info_response(q)
         except Exception as e:
             return {
                 "answer": None,
