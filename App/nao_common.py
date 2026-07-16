@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import tempfile
 import urllib.request
@@ -17,6 +18,12 @@ NAO_TTS_TIMEOUT_SEC = int(os.environ.get("NAO_TTS_TIMEOUT_SEC", "30"))
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3:latest")
 MAX_TTS_LEN = int(os.environ.get("MAX_TTS_LEN", "250"))
+
+_TTS_PRONUNCIATION_RULES = (
+    # Expand acronym pronunciation so NAO speaks it naturally in Greek.
+    (re.compile(r"(?<![A-Za-zΑ-Ωα-ωΆ-ώ0-9])ΔΙΠΑΕ(?![A-Za-zΑ-Ωα-ωΆ-ώ0-9])", re.IGNORECASE), "ΔΕΙ ΠΑ Ε"),
+    (re.compile(r"(?<![A-Za-zΑ-Ωα-ωΆ-ώ0-9])ΠΜΣ(?![A-Za-zΑ-Ωα-ωΆ-ώ0-9])", re.IGNORECASE), "ΠΟΥ ΜΟΥ ΣΟΥ"),
+)
 
 DEFAULT_TEXT_SYSTEM_PROMPT = (
     "Είσαι το ρομπότ NAO και μιλάς σε επισκέπτες της σχολής ΔΙΠΑΕ. "
@@ -83,6 +90,9 @@ def rule_based_response(text: str) -> str | None:
 
 def tts_clip(text: str, max_len: int = MAX_TTS_LEN) -> str:
     t = " ".join((text or "").split())
+    for pattern, replacement in _TTS_PRONUNCIATION_RULES:
+        t = pattern.sub(replacement, t)
+
     if len(t) <= max_len:
         return t
 
